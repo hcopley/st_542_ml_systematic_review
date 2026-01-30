@@ -1,0 +1,14 @@
+---
+title: "Methods_Notes"
+output: html_document
+---
+
+## Data Import Notes: 
+
+1/29/26: Imported training data and file with records that were selected for full text screening 
+flagged records that were selected for screening. 
+
+Imported a single file from the "new data" in .ris format as a test in both R and python
+python uses rispy library, R uses revtools
+
+Next steps: combine new data into single df, assess missingness, viability of columns, size shape, etc for both training and new data. 
