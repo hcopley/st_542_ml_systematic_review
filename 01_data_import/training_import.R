@@ -34,7 +34,7 @@ train_labeled <- train %>%
     left_join(screened %>% 
                   select(id) %>%
                   distinct() %>%
-                  mutate(screened = 1), by = "id")
+                  mutate(recd_screen = 1), by = "id")
     
 
 # Basic structure checks
