@@ -1,0 +1,282 @@
+---
+title: "Data Quality and Readiness Assessment"
+author: "ST 542 Project Team"
+format: revealjs
+editor: source
+execute:
+  warning: false
+  message: false
+---
+
+# Purpose of This Document
+
+This document describes data quality checks and basic descriptive summaries
+performed on bibliographic datasets used for machine-learning–assisted
+screening in a literature review.
+
+The purpose of this assessment is to confirm that:
+- The data are complete and internally consistent
+- Screening labels are well defined
+- Text fields are usable for modeling
+- Training and prediction datasets are comparable
+
+This document focuses on data readiness and does not include modeling.
+
+---
+
+# Data Sources
+
+## Training Dataset
+
+- Source(s): Multiple bibliographic databases
+- Date range: 2011–2015
+- Unit of analysis: bibliographic record
+- Screening label: selected for full-text screening (binary)
+
+## Prediction Dataset
+
+- Source(s): EBSCOHost
+- Date range: 2016–2025
+- Unit of analysis: bibliographic record
+- Intended use: model-based prioritization for screening
+
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(skimr)
+```
+
+---
+
+# Data Ingestion
+
+```{r}
+training_df <- read_csv("training_data.csv") %>% clean_names()
+prediction_df <- read_csv("prediction_data.csv") %>% clean_names()
+```
+
+---
+
+# High-Level Descriptive Overview (skimr)
+
+This section provides a quick, standardized summary of each dataset,
+including variable types, missingness, and basic distributions.
+These summaries are descriptive and do not replace rule-based checks
+later in the document.
+
+## Training Dataset Overview
+
+```{r}
+skim(training_df)
+```
+
+## Prediction Dataset Overview
+
+```{r}
+skim(prediction_df)
+```
+
+---
+
+# Record-Level Integrity Checks
+
+## Unique Identifiers
+
+```{r}
+tibble(
+  dataset = c("training", "prediction"),
+  n_rows = c(nrow(training_df), nrow(prediction_df)),
+  n_unique_ids = c(
+    n_distinct(training_df$id),
+    n_distinct(prediction_df$id)
+  )
+)
+```
+
+## Duplicate Indicators
+
+```{r}
+if ("dupflag" %in% names(training_df)) {
+  training_df %>% count(dupflag)
+}
+```
+
+---
+
+# Required Fields Check
+
+This section verifies that required fields exist and are populated.
+Detailed summaries of missingness are provided by `skimr`; this section
+focuses on explicit checks.
+
+```{r}
+required_fields_summary <- function(df) {
+  tibble(
+    pct_missing_title = mean(is.na(df$title) | df$title == ""),
+    pct_missing_abstract = mean(is.na(df$abstract) | df$abstract == ""),
+    pct_missing_year = mean(is.na(df$year))
+  )
+}
+
+bind_rows(
+  training = required_fields_summary(training_df),
+  prediction = required_fields_summary(prediction_df),
+  .id = "dataset"
+)
+```
+
+---
+
+# Text Field Quality
+
+## Text Fields Overview (skimr)
+
+This summary focuses specifically on the title and abstract fields.
+
+```{r}
+training_df %>%
+  select(title, abstract) %>%
+  skim()
+```
+
+```{r}
+prediction_df %>%
+  select(title, abstract) %>%
+  skim()
+```
+
+## Boilerplate or Placeholder Abstracts
+
+```{r}
+boilerplate_patterns <- c(
+  "no abstract",
+  "abstract not available",
+  "not available"
+)
+
+training_df %>%
+  filter(
+    str_detect(
+      tolower(abstract),
+      paste(boilerplate_patterns, collapse = "|")
+    )
+  ) %>%
+  count()
+```
+
+---
+
+# Label Quality (Training Data Only)
+
+## Label Distribution
+
+```{r}
+training_df %>% count(screened)
+```
+
+## Label Prevalence by Year
+
+```{r}
+training_df %>%
+  mutate(pub_year = as.numeric(substr(year, 1, 4))) %>%
+  group_by(pub_year) %>%
+  summarise(
+    n = n(),
+    pct_screened = mean(screened == 1, na.rm = TRUE)
+  )
+```
+
+## Spot Checks
+
+```{r}
+set.seed(123)
+
+training_df %>%
+  filter(screened == 1) %>%
+  slice_sample(n = 5) %>%
+  select(id, title, abstract)
+```
+
+---
+
+# Training vs Prediction Dataset Comparison
+
+This section compares key characteristics of the training and prediction
+datasets to identify potential differences that may affect modeling.
+
+## Combined Descriptive Summary (skimr)
+
+```{r}
+bind_rows(
+  training = training_df,
+  prediction = prediction_df,
+  .id = "dataset"
+) %>%
+  skim()
+```
+
+## Publication Year Comparison
+
+```{r}
+bind_rows(
+  training = training_df,
+  prediction = prediction_df,
+  .id = "dataset"
+) %>%
+  mutate(pub_year = as.numeric(substr(year, 1, 4))) %>%
+  ggplot(aes(pub_year, fill = dataset)) +
+  geom_histogram(
+    bins = 30,
+    position = "identity",
+    alpha = 0.5
+  ) +
+  labs(title = "Publication Year Distribution by Dataset")
+```
+
+---
+
+# Modeling Readiness Checks (Non-Modeling)
+
+## Required Fields for Modeling
+
+```{r}
+required_features <- c("title", "abstract", "year")
+
+tibble(
+  feature = required_features,
+  in_training = required_features %in% names(training_df),
+  in_prediction = required_features %in% names(prediction_df)
+)
+```
+
+## Combined Text Sanity Check
+
+```{r}
+training_df %>%
+  mutate(text_len = nchar(paste(title, abstract))) %>%
+  summarise(
+    pct_empty_text = mean(text_len == 0)
+  )
+```
+
+---
+
+# Summary of Findings
+
+- Overall data quality:
+- Key limitations (e.g., missing abstracts, source differences):
+- Implications for downstream modeling:
+
+---
+
+# Appendix
+
+## Session Information
+
+```{r}
+sessionInfo()
+```

@@ -20,7 +20,7 @@ Folders are numbered to encourage a consistent execution order.
 
 ```
 .
-├── 00_input
+├── 00_data_input
 ├── 01_data_import
 ├── 02_data_prep
 ├── 03_modeling
@@ -36,7 +36,7 @@ Folders are numbered to encourage a consistent execution order.
 
 ## Folder Descriptions
 
-### `00_input/`
+### `00_data_input/`
 Raw, immutable input files.
 
 This folder should contain:
@@ -79,7 +79,7 @@ This stage is intentionally separated from modeling to make assumptions explicit
 ---
 
 ### `03_modeling/`
-Model development and evaluation.
+Model development and evaluation.I
 
 This folder may include:
 - Scripts or notebooks for:
