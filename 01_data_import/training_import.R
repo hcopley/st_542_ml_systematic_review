@@ -65,7 +65,7 @@ labeled_data <- train_labeled %>%
 labeled_sum <-skim(train_labeled)
 
 #write out the labelled data
-write.csv(labeled_data, '04_output/labeled_data.csv')
+write.csv(labeled_data, '04_output/labeled_data.csv', row.names = FALSE)
 
 
 
