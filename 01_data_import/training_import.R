@@ -12,7 +12,7 @@ input <- '00_data_input/'
 # Training data
 train <- read_csv(paste0(input, "pdr006_nodups.csv")) %>%
     distinct() %>%
-    clean_names()
+    clean_names() 
 
 # Records that were selected for full text screening
 screened <- read_excel(paste0(input, "Copy of full-text screening 20190909.xlsx")) %>%
@@ -23,11 +23,18 @@ screened <- read_excel(paste0(input, "Copy of full-text screening 20190909.xlsx"
 sum_screened <- skim(screened)
 sum_train <- skim(train)
 
-colnames(train)
-colnames(screened)
+train_cols <- colnames(train)
+screened_cols <- colnames(screened)
+
+#check which columns are in both datasets
+intersect(train_cols, screened_cols)
 
 #check which columns are in screened but not in train
-setdiff(colnames(screened), colnames(train))
+setdiff(screened_cols, train_cols)
+
+#check which columns are in train but not in screen
+setdiff(train_cols, screened_cols)
+
 
 #compare the 2 datasets
 comparison <- comparedf(train, screened, by = c('index' = 'x1'))
@@ -44,15 +51,21 @@ train_labeled <- train %>%
     
 #after matching on the index column and the first column in the screened data
 #there is only 1 row with non-matching titles and this was simply a truncation 
-#in the screened file
+#in the screened file. There are however many missing titles in the screened data
 test_matches <-train_labeled %>%
     select(title.x, title.y) %>%
-    filter(!is.na(title.y) & title.x != title.y)
+    filter(title.x != title.y)
 
+#we can drop the extra title column
+labeled_data <- train_labeled %>%
+    select(-title.y) %>%
+    rename('title' = title.x)
 
 #take a look at the resulting data profile:
 labeled_sum <-skim(train_labeled)
 
+#write out the labelled data
+write.csv(labeled_data, '04_output/labeled_data.csv')
 
 
 
