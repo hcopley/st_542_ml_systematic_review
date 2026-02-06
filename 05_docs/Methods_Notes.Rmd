@@ -12,3 +12,7 @@ Imported a single file from the "new data" in .ris format as a test in both R an
 python uses rispy library, R uses revtools
 
 Next steps: combine new data into single df, assess missingness, viability of columns, size shape, etc for both training and new data. 
+
+2/4/26: Imported all new data .ris files into R and combined into a single dataframe. Switched to using synthesisr package for reading in .ris files due to getting encoding warnings from revtools. The resulting data has small differences in columns. 
+
+Learned that DOI's are not reliable for deduplication across different journals. Went back to revtools for stringdist deduplication methods. The previous protocol mentions "create a program for deduplication" but it does not mention how this was done and if a reference manager, programming language or specific software was used. Need info from PI on previous deduplication methods. Can use revtools, options are jw = jaro-winkler, osa, levenshtein, etc. need to make a sound choice.

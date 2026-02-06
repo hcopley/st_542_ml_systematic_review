@@ -1,28 +1,85 @@
 ---
 title: "Data Quality and Readiness Assessment"
-author: "ST 542 Project Team"
-format: revealjs
+author: "Heather Copley, Jarret Glass, Andras Paul"
+format: 
+  html:
+    toc: true
+    theme: flatly
+    code-fold: true
+    embed-resources: true
 editor: source
 execute:
   warning: false
   message: false
+  eval: true
+editor_options: 
+  chunk_output_type: console
+  code_folding: hide
 ---
 
-# Purpose of This Document
+# Purpose
 
 This document describes data quality checks and basic descriptive summaries
-performed on bibliographic datasets used for machine-learning–assisted
-screening in a literature review.
+performed on bibliographic data sets to be used for machine-learning–assisted
+screening in a systematic review.
 
 The purpose of this assessment is to confirm that:
+
 - The data are complete and internally consistent
 - Screening labels are well defined
 - Text fields are usable for modeling
-- Training and prediction datasets are comparable
+- Training and prediction data sets are comparable
 
 This document focuses on data readiness and does not include modeling.
 
 ---
+
+# Summary of Findings
+
+- Overall data quality is reasonably good, with a few manageable issues noted below.
+
+- Training data has noticeable missing abstracts and some duplicates.
+
+    - 4,455(9%) records in the training set lack abstracts.
+    - There are 1886 duplicated DOIs in the training set. These should be investigated further and de-duplicated where possible. 
+
+- Prediction data also shows gaps, notably missing DOIs and abstracts.
+
+    - 4,314(9%) records are missing DOIs.
+    - 2,486(6%) records are missing abstracts.
+    
+    DOI gaps may matter for checking duplication; abstract gaps reduce usable text for model input.
+
+- Some columns have very low completion and can be removed.
+
+    - Training data contain several columns with under 10% completion. These can be dropped safely to simplify preprocessing.
+
+- Boilerplate or placeholder text is present in the abstracts.
+
+    - There are 846 records that appear to have copyright or boilerplate language in the abstract field. These may not be useful for modeling and could be removed.
+
+- Label distribution is imbalanced and not stable over time
+
+    - 12% of training records are labeled for full-text screening.
+    - The proportion of records labeled for screening varies by publication year, with no records recommended for screening prior to 2011.
+
+- Training and prediction data sets span different time periods and sources.
+
+    - Training: bibliographic sources from 2011–2015.
+    - Prediction: EBSCOHost from 2016–2025.
+    
+    This gap is intentional but should be kept in mind for temporal shifts. Restricting the training set to EBSCOHost records only may also be considered depending on the resulting number of records remaining after cleaning.
+
+- Recommended Next Steps
+
+    - Remove or ignore columns with very low completion upfront.
+    - Consider strategies for handling missing abstracts: decide whether to exclude those records or use title‑only inputs.
+    - De‑duplicate or at least mark suspected duplicates in training data to avoid inflating counts or biasing training.
+    - Consider a deduplication strategy for new data possibly based on DOI and text similarity.
+    - Review boilerplate abstracts and decide on removal criteria.
+    - Track data cleaning steps carefully to ensure reproducibility.
+    - Consider temporal and source differences when interpreting model results.
+    - Perform temporal checks on prediction results to ensure consistent performance over time (e.g. due to shifts in medical terminology, publication practices, or other factors).
 
 # Data Sources
 
@@ -42,28 +99,48 @@ This document focuses on data readiness and does not include modeling.
 
 ---
 
-# Setup
 
-```{r}
+```{r setup, include=FALSE}
 library(tidyverse)
 library(janitor)
 library(skimr)
+library(DT)
+library(DataExplorer)
+library(rmarkdown)
+library(summarytools)
+```
+
+
+```{r data_import}
+
+input <- output <- '../../04_output/'
+exports <- '../../06_exports/'
+    
+training_df <- read_csv(paste0(input, 'labeled_data.csv')) %>% 
+    clean_names()
+
+#create a report before cleaning
+#create_report(training_df
+#              ,output_format = html_document(toc = TRUE, theme = "flatly")
+#              ,output_file = 'pre_prep_training_report.html'
+#              ,output_dir = exports
+#              ,y = 'recd_screen')
+
+
+prediction_df <- read_csv(paste0(input, "combined_new_data.csv")) %>% clean_names()
+
+#create_report(prediction_df
+#              ,output_format = html_document(toc = TRUE, theme = "flatly")
+#              ,output_file = 'pre_prep_new_data_report.html'
+#              ,output_dir = exports)
+
 ```
 
 ---
 
-# Data Ingestion
+# High-Level Descriptive Overview
 
-```{r}
-training_df <- read_csv("training_data.csv") %>% clean_names()
-prediction_df <- read_csv("prediction_data.csv") %>% clean_names()
-```
-
----
-
-# High-Level Descriptive Overview (skimr)
-
-This section provides a quick, standardized summary of each dataset,
+This section provides a quick, standardized summary of each data set,
 including variable types, missingness, and basic distributions.
 These summaries are descriptive and do not replace rule-based checks
 later in the document.
@@ -71,14 +148,28 @@ later in the document.
 ## Training Dataset Overview
 
 ```{r}
-skim(training_df)
+training_summary <- skim(training_df)
+datatable(training_summary)
+
 ```
+
+- The training data has several columns with <10% complete rate. We can safely remove these. 
+- Abstracts in the training set have up to `r max(training_summary$character.max[training_summary$skim_variable == "abstract"])` characters.
+- There are `r sum(is.na(training_df$abstract))` missing abstracts in the training dataset.
+- There are less unique abstracts and titles than there are records. This indicates some duplicates exist in the training data.
 
 ## Prediction Dataset Overview
 
 ```{r}
-skim(prediction_df)
+prediction_summary <- skim(prediction_df)
+datatable(prediction_summary)
+
 ```
+
+- The lowest complete rate is `r round(min(prediction_summary$complete_rate), digits = 2)` for the prediction data the other columns are mostly complete. 
+- There are `r sum(is.na(prediction_df$doi))` that are missing DOIs in the prediction data set.
+- Abstracts in the prediction set have up to `r max(prediction_summary$character.max[prediction_summary$skim_variable == "abstract"])` characters.
+- There are `r sum(is.na(prediction_df$abstract))` missing abstracts in the prediction data set.
 
 ---
 
@@ -87,34 +178,101 @@ skim(prediction_df)
 ## Unique Identifiers
 
 ```{r}
-tibble(
+
+unique_ids <- tibble(
   dataset = c("training", "prediction"),
   n_rows = c(nrow(training_df), nrow(prediction_df)),
   n_unique_ids = c(
-    n_distinct(training_df$id),
-    n_distinct(prediction_df$id)
-  )
-)
+    n_distinct(training_df$index, na.rm = TRUE),
+    n_distinct(prediction_df$doi, na.rm = TRUE)
+  ),
+  n_missing = c(
+    sum(is.na(training_df$index)),
+    sum(is.na(prediction_df$doi))
+  ),
+  n_duplicates = c(
+    sum(duplicated(training_df$index, na.rm = TRUE)),
+    sum(duplicated(prediction_df$doi, na.rm = TRUE))
+))
+    
+
+datatable(unique_ids)
+
 ```
+
+- DOIs are not unique in the prediction data set there are `r sum(duplicated(prediction_df$doi, na.rm = TRUE))` duplicate DOIs. We will want to de-duplicate at least first by DOI and possibly later my string distinct methods on titles and abstracts. 
+- There are `r sum(is.na(prediction_df$doi))` missing DOIs in the prediction data set. We may want to consider another unique identifier, or drop these records. 
 
 ## Duplicate Indicators
 
+We believe the training data was de-duplicated and the later a unique index was assigned to each record. We can check whether there are unexpected duplicates using some fields that should theoretically be unique such as DOI. 
+Duplicate DOIs could represent different version updates, corrections or retractions of the same article, truncation, or simply data errors, but we should investigate these further.
+
+
 ```{r}
-if ("dupflag" %in% names(training_df)) {
-  training_df %>% count(dupflag)
-}
+
+dupe_dois <- training_df %>%
+    filter(!is.na(doi)) %>%
+    group_by(doi) %>%
+    summarise(num_duplicates = n()) %>%
+    filter(num_duplicates > 1) %>%
+    arrange(desc(num_duplicates))
+
+datatable(dupe_dois %>% head(10))
+
 ```
+ 
+There are `r nrow(dupe_dois)` duplicate DOIs in the training data set. There are 2 ouliers that are duplicated 10 or more times. Some examples are shown above. We will look at these more closely below.
+
+```{r}
+
+top_duplicated <- training_df %>%
+    filter(doi %in% dupe_dois$doi[1]) %>%
+    select(doi, title, abstract, journal, date)
+
+datatable(top_duplicated)
+    
+```
+
+The doi that is replicated the most often is `r dupe_dois$doi[1]` with `r dupe_dois$num_duplicates[1]` duplicates. Looking at the titles and abstracts seems to confirm that these are in fact different articles, however some of the abstracts are filled with copyright language rather than the actual abstract. 
+
+```{r}
+
+sec_duplicated <- training_df %>%
+    filter(doi %in% dupe_dois$doi[2]) %>%
+    select(doi, title, abstract, journal, date) 
+
+datatable(sec_duplicated)
+    
+```
+
+
+The doi that is replicated the 2nd most frequently is `r dupe_dois$doi[2]` with `r dupe_dois$num_duplicates[2]` duplicates. A few of these do look to be duplicates, but the majority are not, and removing records that have no abstract would resolve this issue in this case.
+
+For the remainder however These appear to be mostly duplicated records with some minor variations in titles or abstracts though removing records with missing abstracts would take care of a small percentage of these records.
+
+```{r}
+
+mostly_dupes <- training_df %>%
+    filter(doi %in% c(dupe_dois$doi[3:nrow(dupe_dois)])) %>%
+    select(doi, title, abstract, journal, date) %>%
+    arrange(doi)
+
+datatable(mostly_dupes %>% head(10))
+
+```
+
 
 ---
 
 # Required Fields Check
 
 This section verifies that required fields exist and are populated.
-Detailed summaries of missingness are provided by `skimr`; this section
+Detailed summaries of missingness are provided above; this section
 focuses on explicit checks.
 
 ```{r}
-required_fields_summary <- function(df) {
+summarize_fields <- function(df) {
   tibble(
     pct_missing_title = mean(is.na(df$title) | df$title == ""),
     pct_missing_abstract = mean(is.na(df$abstract) | df$abstract == ""),
@@ -122,51 +280,92 @@ required_fields_summary <- function(df) {
   )
 }
 
-bind_rows(
-  training = required_fields_summary(training_df),
-  prediction = required_fields_summary(prediction_df),
+required_field_summary <- bind_rows(
+  training = summarize_fields(training_df),
+  prediction = summarize_fields(prediction_df),
   .id = "dataset"
 )
+
+datatable(required_field_summary)
+
 ```
+
+There are no missing titles in either data set. The training data set has `r round(100 * summarize_fields(training_df)$pct_missing_abstract, 2)`% missing abstracts while the prediction data set has `r round(100 * summarize_fields(prediction_df)$pct_missing_abstract, 2)`% missing abstracts. Both data sets have nearly complete year information.
 
 ---
 
 # Text Field Quality
 
-## Text Fields Overview (skimr)
+## Text Fields Overview
 
 This summary focuses specifically on the title and abstract fields.
 
-```{r}
-training_df %>%
-  select(title, abstract) %>%
-  skim()
-```
+### Training Data Text Field Summary
 
 ```{r}
-prediction_df %>%
+train_sum <- training_df %>%
   select(title, abstract) %>%
   skim()
+
+datatable(train_sum)
+```
+
+### New Data Text Field Summary
+
+```{r}
+pred_sum <- prediction_df %>%
+  select(title, abstract) %>%
+  skim()
+
+datatable(pred_sum)
+
 ```
 
 ## Boilerplate or Placeholder Abstracts
 
+Abstracts that are identical across multiple records may indicate boilerplate text that would not be useful in modeling.
+
+
 ```{r}
+
+#search for abstracts that have a large number of duplicates
+dupe_abstract <- training_df %>%
+    filter(!is.na(abstract)) %>%
+    mutate(abstract = tolower(abstract)) %>%
+    group_by(abstract) %>%
+    summarise(num_duplicates = n()) %>%
+    filter(num_duplicates > 5) 
+
+datatable(dupe_abstract %>% arrange(desc(num_duplicates)))
+
+```
+
+
+The abstracts that are repeated more that 5 times shown above appear to be boilerplate rather than meaningful abstracts. These may not be useful for modeling and could be removed. There are `r sum(dupe_abstract$num_duplicates)` records with these abstracts in the training data set.
+
+
+```{r}
+# Look for common boilerplate patterns
 boilerplate_patterns <- c(
   "no abstract",
-  "abstract not available",
-  "not available"
+  "abstract not available"
 )
 
-training_df %>%
+boilerplate_records <- training_df %>%
   filter(
     str_detect(
       tolower(abstract),
       paste(boilerplate_patterns, collapse = "|")
     )
   ) %>%
-  count()
+    group_by(tolower(abstract)) %>%
+    count()
+
+datatable(boilerplate_records)
 ```
+
+
+Looking explicitly for common boilerplate patterns reveals only `r nrow(boilerplate_records)` records and only one is non-informative. This suggests that boilerplate abstracts are not a major issue in this data set, but copy-write language in the abstract field may still be a concern.
 
 ---
 
@@ -175,30 +374,55 @@ training_df %>%
 ## Label Distribution
 
 ```{r}
-training_df %>% count(screened)
+labeled <- training_df %>% count(recd_screen)
+
+datatable(labeled)
+
+ggplot(labeled, aes(factor(recd_screen), n)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Distribution of Screening Labels",
+    x = "Screening Label (0 = Excluded, 1 = Included)",
+    y = "Count"
+  )
+
 ```
 
 ## Label Prevalence by Year
 
 ```{r}
-training_df %>%
+pct_by_year <- training_df %>%
   mutate(pub_year = as.numeric(substr(year, 1, 4))) %>%
   group_by(pub_year) %>%
   summarise(
     n = n(),
-    pct_screened = mean(screened == 1, na.rm = TRUE)
+    pct_screened = mean(recd_screen == 1, na.rm = TRUE)
   )
+
+ggplot(pct_by_year, aes(pub_year, pct_screened)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Proportion of Records Recommended for Screening by Publication Year",
+    x = "Publication Year",
+    y = "Proportion Recommended for Screening In"
+  )
+
 ```
+
+There were no publications recommended for full-text review in years prior to 2011. 
 
 ## Spot Checks
 
 ```{r}
 set.seed(123)
 
-training_df %>%
-  filter(screened == 1) %>%
+spot_check <- training_df %>%
+  filter(recd_screen == 1) %>%
   slice_sample(n = 5) %>%
-  select(id, title, abstract)
+  select(index, title, abstract)
+
+datatable(spot_check)
 ```
 
 ---
@@ -206,35 +430,38 @@ training_df %>%
 # Training vs Prediction Dataset Comparison
 
 This section compares key characteristics of the training and prediction
-datasets to identify potential differences that may affect modeling.
+data sets to identify potential differences that may affect modeling.
 
-## Combined Descriptive Summary (skimr)
+## Combined Descriptive Summary
 
 ```{r}
-bind_rows(
-  training = training_df,
-  prediction = prediction_df,
-  .id = "dataset"
-) %>%
-  skim()
+
+#find common columns
+intersect_cols <- intersect(
+  colnames(training_df),
+  colnames(prediction_df)
+)
+
+combined_dataset <- bind_rows(
+  training = training_df %>% select(intersect_cols) %>% mutate(year = as.double(substr(year,1, 4)))
+  ,prediction = prediction_df %>% select(intersect_cols)
+  ,.id = "dataset"
+) 
+
+combined_summary <- skim(combined_dataset)
+
+datatable(combined_summary)
 ```
 
 ## Publication Year Comparison
 
 ```{r}
-bind_rows(
-  training = training_df,
-  prediction = prediction_df,
-  .id = "dataset"
-) %>%
-  mutate(pub_year = as.numeric(substr(year, 1, 4))) %>%
-  ggplot(aes(pub_year, fill = dataset)) +
-  geom_histogram(
-    bins = 30,
-    position = "identity",
-    alpha = 0.5
-  ) +
-  labs(title = "Publication Year Distribution by Dataset")
+combined_dataset %>%
+  ggplot(aes(year, fill = dataset)) +
+    geom_bar(position = "dodge") +
+  labs(title = "Publications by Year in Training vs Prediction Datasets",
+       x = "Publication Year",
+       y = "Count")
 ```
 
 ---
@@ -246,37 +473,19 @@ bind_rows(
 ```{r}
 required_features <- c("title", "abstract", "year")
 
-tibble(
+req_feat_sum <- tibble(
   feature = required_features,
   in_training = required_features %in% names(training_df),
   in_prediction = required_features %in% names(prediction_df)
 )
+
+datatable(req_feat_sum)
 ```
 
-## Combined Text Sanity Check
-
-```{r}
-training_df %>%
-  mutate(text_len = nchar(paste(title, abstract))) %>%
-  summarise(
-    pct_empty_text = mean(text_len == 0)
-  )
-```
 
 ---
 
-# Summary of Findings
+# Use of Generative AI 
 
-- Overall data quality:
-- Key limitations (e.g., missing abstracts, source differences):
-- Implications for downstream modeling:
+Generative AI was used to help draft the initial structure of this Data Readiness Assessment and to act as a thought partner during review, including checking for potential errors or gaps. All substantive decisions, interpretations, and conclusions were made and reviewed by the authors.
 
----
-
-# Appendix
-
-## Session Information
-
-```{r}
-sessionInfo()
-```
