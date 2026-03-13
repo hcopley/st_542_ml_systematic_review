@@ -1,5 +1,6 @@
 ---
 title: "Data Quality and Readiness Assessment"
+subtitle: "ML-Assisted Screening for Systematic Reviews"
 author: "Heather Copley, Jarret Glass, Andras Paul"
 format: 
   html:
@@ -12,9 +13,9 @@ execute:
   warning: false
   message: false
   eval: true
+  echo: false
 editor_options: 
   chunk_output_type: console
-  code_folding: hide
 ---
 
 # Purpose
