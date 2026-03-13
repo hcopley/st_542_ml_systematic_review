@@ -1,0 +1,307 @@
+---
+title: "Text Preparation"
+format: html
+editor: visual
+editor_options:
+  chunk_output_type: console
+execute: 
+    eval: false
+---
+
+```{r setup}
+library(tidyverse)
+library(caret)
+library(quanteda)
+library(here)
+library(reticulate)
+use_condaenv('r-gensim', required = TRUE)
+```
+
+# Text Preparation: PubMedBERT vs TF-IDF vs Doc2Vec
+
+## 1: Set up for 5-Fold Cross Validation
+
+Create stratified 5-fold CV splits. The `folds` list is saved as an `.rds` file so the same fold assignments can be reused in `model_comparison.qmd`.
+
+```{r load_cleaned_abstracts}
+# Load cleaned abstracts and labels; assign a row ID to each record
+# str_squish() collapses embedded \n, \r\n, \t to single spaces so that
+# the text field is single-line and safe for CSV/Python parsing
+abstracts <- read_csv(here('04_output', 'test_data.csv')) %>%
+    rowid_to_column('id') %>%
+    select(id, text, recd_screen) %>%
+    mutate(text = str_squish(text))
+
+# Set seed for reproducibility
+set.seed(42)
+
+# Create stratified 5-fold CV splits
+# folds[[k]] contains the row indices (= id values) for the test set of fold k
+folds <- createFolds(abstracts$recd_screen, k = 5, list = TRUE, returnTrain = FALSE)
+
+# Check stratification across folds
+map_dfr(seq_along(folds), ~ tibble(
+  fold     = .x,
+  n        = length(folds[[.x]]),
+  pos_rate = mean(abstracts$recd_screen[folds[[.x]]])
+))
+
+# Save folds object for use in model_comparison.qmd
+saveRDS(folds, here('04_output', 'cv_folds.rds'))
+
+# Save abstracts for Python embedding generation
+write_csv(abstracts, here('04_output', 'abstracts.csv'))
+```
+
+------------------------------------------------------------------------
+
+# Text Pre-processing Methods
+
+## Method 1: PubMedBERT
+
+Embeddings are generated in Python using the pre-trained `NeuML/pubmedbert-base-embeddings` model. Since the model is pre-trained, embeddings are fold-independent — all records are encoded at once. Fold awareness is handled in R via `cv_folds.rds`.
+
+Run in Google Colab with GPU runtime for faster embedding generation.
+
+```{python}
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+
+# Load abstracts (id, text, recd_screen)
+df = pd.read_csv('abstracts.csv')
+
+# Encode all records at once
+model = SentenceTransformer('NeuML/pubmedbert-base-embeddings')
+embeddings = model.encode(df['text'].tolist(), batch_size=64, show_progress_bar=True)
+
+emb_df = pd.DataFrame(embeddings)
+emb_df.insert(0, 'id', df['id'].values)
+emb_df.insert(1, 'recd_screen', df['recd_screen'].values)
+
+emb_df.to_csv('pubmedbert_embeddings.csv', index=False)
+print(f"Final embeddings shape: {emb_df.shape}")
+```
+
+### Load PubMedBERT embeddings into R
+
+```{r load_bert}
+# Read back the full embeddings matrix with label column
+pubmedbert <- read_csv(here('04_output', 'pubmedbert_embeddings.csv'))
+```
+
+------------------------------------------------------------------------
+
+## Method 2: TF-IDF
+
+TF-IDF features are computed in R. To prevent data leakage, the vocabulary is learned from the training folds only, and `dfm_match()` aligns the test fold feature set to the training vocabulary. Test-fold feature matrices are assembled into a single full-dataset matrix after the fold loop.
+
+-   Lowercase
+-   Remove punctuation, numbers, symbols
+-   Remove stopwords (Snowball English list)
+-   Stem words (Porter algorithm)
+
+```{r tfidf_function}
+# TF-IDF preprocessing function
+preprocess_tfidf <- function(texts) {
+  tokens(texts,
+         remove_punct   = TRUE,
+         remove_numbers = TRUE,
+         remove_symbols = TRUE) %>%
+    tokens_tolower() %>%
+    tokens_remove(pattern = stopwords("english", source = "snowball")) %>%
+    tokens_wordstem(language = "english") %>%
+    dfm()
+}
+```
+
+```{r tfidf_vocab_diagnostic}
+# Build DFM on full corpus to explore vocabulary size vs. min_docfreq threshold
+# Use this plot to choose min_docfreq in the fold loop below
+dfm_full <- preprocess_tfidf(abstracts$text)
+
+vocab_diag <- map_dfr(c(1, 2, 3, 5, 10, 15, 20, 30, 50, 75, 100), ~ tibble(
+  min_docfreq  = .x,
+  n_terms      = nfeat(dfm_trim(dfm_full, min_docfreq = .x)),
+  pct_retained = nfeat(dfm_trim(dfm_full, min_docfreq = .x)) / nfeat(dfm_full) * 100
+))
+
+ggplot(vocab_diag, aes(x = min_docfreq, y = n_terms)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = c(1, 2, 3, 5, 10, 15, 20, 30, 50, 75, 100)) +
+  labs(title = "Vocabulary size vs. minimum document frequency",
+       x     = "min_docfreq (minimum documents a term must appear in)",
+       y     = "Number of terms retained") +
+  theme_minimal()
+
+print(vocab_diag)
+```
+
+```{r tfidf_dropped_terms}
+# Inspect terms that would be dropped at a given threshold
+# Adjust `inspect_threshold` to match whichever cutoff you are considering
+inspect_threshold <- 10
+
+doc_freqs <- docfreq(dfm_full)
+
+tibble(term    = names(doc_freqs),
+       docfreq = as.integer(doc_freqs)) %>%
+  filter(docfreq < inspect_threshold) %>%
+  arrange(desc(docfreq)) %>%   # highest docfreq first = most borderline drops
+  print(n = 50)
+```
+
+```{r tfidf_folds}
+# List to collect test-fold feature matrices in row order
+tfidf_test_list <- vector("list", 5)
+
+for (fold_index in 1:5) {
+  cat(sprintf("\n== TF-IDF Fold %d ==\n", fold_index))
+
+  test_idx  <- folds[[fold_index]]
+  train_idx <- setdiff(seq_len(nrow(abstracts)), test_idx)
+
+  df_train <- abstracts[train_idx, ]
+  df_test  <- abstracts[test_idx, ]
+
+  # Learn vocabulary from training fold; trim rare terms; apply to test fold
+  # min_docfreq = 5 drops terms appearing in fewer than 5 training documents,
+  # keeping vocabulary manageable and avoiding sparse/noisy features
+  dfm_train <- preprocess_tfidf(df_train$text) %>%
+      dfm_trim(min_docfreq = 5)
+  dfm_test  <- preprocess_tfidf(df_test$text) %>%
+      dfm_match(features = featnames(dfm_train))
+
+  # Apply TF-IDF weighting using training-corpus IDF (prevents leakage)
+  idf_train      <- docfreq(dfm_train, scheme = "inverse", base = 10)
+  dfm_test_tfidf <- dfm_weight(dfm_test, weights = idf_train)
+
+  # Store test-fold matrix with metadata
+  tfidf_test_list[[fold_index]] <- as.data.frame(as.matrix(dfm_test_tfidf)) %>%
+      mutate(id          = df_test$id,
+             recd_screen = df_test$recd_screen,
+             .before     = 1)
+}
+
+# Assemble full-dataset TF-IDF matrix, sorted by id
+tfidf_full <- bind_rows(tfidf_test_list) %>%
+    arrange(id)
+
+write_csv(tfidf_full, here('04_output', 'tfidf_features.csv'))
+```
+
+------------------------------------------------------------------------
+
+## Method 3: Doc2Vec
+
+Doc2Vec embeddings are computed in R using `paragraph2vec()`. To prevent data leakage, a separate model is trained on the training folds within each CV fold. Test-fold embeddings are assembled into a single full-dataset matrix after the fold loop.
+
+-   Lowercase
+-   Keep only alphanumeric characters and spaces
+
+```{r doc2vec_function}
+# Doc2Vec preprocessing: lowercase + alphanumeric only + normalize whitespace
+preprocess_doc2vec <- function(.data) {
+  .data %>%
+    mutate(text = str_to_lower(text),
+           text = str_replace_all(text, "[^a-z0-9]", " "),
+           text = str_squish(text))
+}
+```
+
+```{r doc2vec_setup}
+# Import gensim Doc2Vec via reticulate
+# Requires gensim in the active Python environment:
+#   py_install("gensim")  # run once if not installed
+TaggedDocument <- import("gensim.models.doc2vec")$TaggedDocument
+Doc2Vec        <- import("gensim.models.doc2vec")$Doc2Vec
+
+# Define a Python batch inference function to avoid crossing the R-Python
+# boundary once per document (which causes C stack overflow at scale)
+py_run_string("
+def batch_infer(model, texts):
+    # Return list of lists (not numpy array) -- reticulate converts reliably
+    return [model.infer_vector(t.split()).tolist() for t in texts]
+")
+```
+
+```{r doc2vec_folds}
+# List to collect test-fold embeddings in row order
+doc2vec_test_list <- vector("list", 5)
+
+for (fold_index in 1:5) {
+  cat(sprintf("\n== Doc2Vec Fold %d ==\n", fold_index))
+
+  test_idx  <- folds[[fold_index]]
+  train_idx <- setdiff(seq_len(nrow(abstracts)), test_idx)
+
+  df_train <- abstracts[train_idx, ] %>% preprocess_doc2vec()
+  df_test  <- abstracts[test_idx,  ] %>% preprocess_doc2vec()
+
+  # Build tagged training documents for gensim
+  # Each document: words = token list, tags = unique doc id string
+  tagged_train <- lapply(seq_len(nrow(df_train)), function(i) {
+    TaggedDocument(
+      words = strsplit(df_train$text[i], " ")[[1]],
+      tags  = list(as.character(df_train$id[i]))
+    )
+  })
+
+  # Train Doc2Vec on training fold only
+  model <- Doc2Vec(
+    tagged_train,
+    vector_size = 100L,
+    window      = 5L,
+    min_count   = 2L,
+    epochs      = 5L,
+    workers     = 4L,
+    seed        = 42L
+  )
+
+  # Infer embeddings for test fold -- entire loop runs in Python to avoid
+  # repeated R-Python boundary crossings that cause C stack overflow
+  # batch_infer returns a list of 100-element lists; rbind assembles into matrix
+  test_embeddings <- do.call(rbind, py$batch_infer(model, df_test$text))
+
+  # Store with metadata -- row order matches df_test
+  doc2vec_test_list[[fold_index]] <- as.data.frame(test_embeddings) %>%
+      mutate(id          = df_test$id,
+             recd_screen = df_test$recd_screen,
+             .before     = 1)
+}
+
+# Assemble full-dataset Doc2Vec matrix, sorted by id
+doc2vec_full <- bind_rows(doc2vec_test_list) %>%
+    arrange(id)
+
+write_csv(doc2vec_full, here('04_output', 'doc2vec_features.csv'))
+
+```
+
+------------------------------------------------------------------------
+
+## Outputs
+
+| File | Description |
+|----|----|
+| `04_output/abstracts.csv` | Full text data (id, text, recd_screen) for Python |
+| `04_output/cv_folds.rds` | Fold assignments list (used by text prep + modeling) |
+| `04_output/pubmedbert_embeddings.csv` | 768-dim PubMedBERT embeddings + label |
+| `04_output/tfidf_features.csv` | TF-IDF feature matrix + label |
+| `04_output/doc2vec_features.csv` | Doc2Vec embeddings (100-dim) + label |
+
+------------------------------------------------------------------------
+
+## Key Implementation Notes
+
+### 1. **Data Leakage Prevention**
+
+-   TF-IDF: Vocabulary and IDF learned from training folds only; `dfm_match()` aligns test vocabulary; `docfreq()` extracts training IDF applied via `dfm_weight()`
+-   Doc2Vec: Model trained on training folds only; `infer_vector()` (gensim via reticulate) infers test embeddings with frozen word weights
+-   PubMedBERT: Pre-trained — no leakage risk; all records encoded at once
+
+### 2. **Preprocessing Differences**
+
+-   **TF-IDF**: Aggressive (stop words, stemming) → needed for sparse representations
+-   **Doc2Vec**: Light (lowercasing, alphanumeric only) → learns from context
+-   **PubMedBERT**: None → pre-trained model handles this internally
