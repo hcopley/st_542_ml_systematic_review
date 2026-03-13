@@ -4,18 +4,19 @@ library(skimr)
 library(arsenal)
 library(tidyverse)
 library(janitor)
+library(here)
 
 
 # Folder path
-input <- '00_data_input/'
+input <- '00_data_input'
 
 # Training data
-train <- read_csv(paste0(input, "pdr006_nodups.csv")) %>%
+train <- read_csv(here(input, "pdr006_nodups.csv")) %>%
     distinct() %>%
     clean_names() 
 
 # Records that were selected for full text screening
-screened <- read_excel(paste0(input, "Copy of full-text screening 20190909.xlsx")) %>%
+screened <- read_excel(here(input, "Copy of full-text screening 20190909.xlsx")) %>%
     distinct() %>%
     clean_names() 
 
@@ -66,6 +67,8 @@ labeled_sum <-skim(train_labeled)
 
 #write out the labelled data
 write.csv(labeled_data, '04_output/labeled_data.csv', row.names = FALSE)
+
+labeled_data$abstract[]
 
 
 
