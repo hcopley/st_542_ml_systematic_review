@@ -1,0 +1,169 @@
+---
+title: "Data Text Cleaning"
+author: "Group 01 - JG"
+format: html
+---
+
+```{r}
+#|include: FALSE
+library(dplyr)
+library(readr)
+library(readxl)
+library(stringr)
+library(purrr)
+library(tidyr)
+library(textreuse) # for de-duplication
+```
+
+## Data Cleaning
+
+There are three files that were kindly provided by Dr. Alan Ellis, which contain all the pertinent details for the primary sources that were included in the original review.
+
+- `pdr006_nodups.csv` - A listing of 49,104 titles and details. This is the full list of search results based on the original parameters. The first column is the index number assigned by Dr. Ellis's team.
+
+- `Copy of full-text screening 20190909.xslx` - relates to the second part of the review, namely the list of 1249 texts selected for fulltext review and their specific comments/rejection reasons.
+
+- `flags_20170320_1117.csv` - The original full listing by index number, with the associated flags indicating rejection reasons, etc.
+
+------------------------------------------------------------
+
+The first step to take is to introduce the indices examined, and either the 1) reason for rejection or 2) fact of it being referred for full-text screening.
+
+```{r}
+# First step: Introduce the indices and reasons for rejection / screening:
+flags <- readr::read_csv("./flags_20170320_1117.csv", show_col_types=FALSE) |>
+    select(index, dup:screen) |>
+    pivot_longer(cols=dup:screen,
+                 names_to="Outcome",
+                 values_to="values") |>
+    filter(values > 0) |>
+    select(-values) |>
+    mutate(Outcome = factor(Outcome,
+                            levels=c("dup", "puno", "no18", "outside", "screen"),
+                            labels=c("Excluded: Duplicate",
+                                     "Excluded: Psychotropic Use not an outcome",
+                                     "Excluded: No Participants age 0-18",
+                                     "Excluded: Outside US Only",
+                                     "Selected for Screening")))
+```
+
+
+# Second: Load the files from `pdr006_nodups`, a list of all papers procured using their defined search terms.
+
+```{r}
+df <- readr::read_csv("./pdr006_nodups (1).csv", show_col_types=FALSE) |>
+    
+    # `Year` is a string. I want to convert these to numerics, really just the year.
+    mutate(year = substr(year, 1, 4),
+           year = as.numeric(year)) |>
+    
+    # Only where year is between 2011 and 2015
+    filter(between(year, 2011, 2015)) |>
+    
+    # For purposes of gathering the data, do not need to include every column.
+    select(index, dupflag, recnum, pubtype, authors, year, title, journal, url, doi, abstract) |>
+    
+    # Clean the encoding in rows.
+    mutate(title = iconv(title, from="UTF-8", to="ASCII//TRANSLIT")) |>
+    mutate(authors = iconv(authors, from="UTF-8", to="ASCII//TRANSLIT")) |>
+    
+    # Create a temporary column of just last names of the authors
+    mutate(temp_lastnames = authors %>%
+               str_extract_all("[:alpha:]+(?=,)") %>%
+               map_chr(~ str_flatten(unique(.x), collapse=",")) %>%
+               str_to_upper) |>
+    
+    # Review the `abstract` column. Remove any abstracts that start with "Copyright".
+    mutate(abstract = if_else(str_starts(abstract, "(?i)Copyright"), NA_character_, abstract)) |>
+    
+    # Create a temporary column for ruling out duplicate abstracts. These changes are to be hard-coded in
+    mutate(temp_abstract = abstract %>%
+               # Get rid of text inside parentheses
+               str_remove_all("\\(.*?\\)") %>%
+               # Remove anything that is not a letter
+               str_replace_all("[^[:alpha:]\\s+]", "") %>%
+               # Convert to uppercase
+               str_to_upper) |>
+    
+    # To sort for duplicates: First, arrange this by the length of the text-only ABSTRACT.
+    mutate(abs_len = nchar(as.character(temp_abstract)),
+           clean_title = str_to_lower(str_replace_all(title, "[^[:alpha:]]", ""))) |>
+    arrange(clean_title, desc(abs_len)) |>
+    
+    # Then: group_by the cleaned title, and use slice(1) to keep the first instance based on abstract length.
+    group_by(clean_title) |>
+    slice(1) |>
+    
+    # Clean the helper columns
+    ungroup() |>
+    
+    # Add the flags indicating rejection status or acceptance
+    left_join(flags, by="index") |>
+    
+    # Remove those flagged as "Duplicate".
+    filter(Outcome != "Excluded: Duplicate")
+```
+
+So far, this code has
+
+1. Received as input the complete list of results that were returned using the search parameters defined in the study's protocol
+
+2. Filtered the list to show only papers between 2011-2015
+
+3. Produced temporary columns with no punctuation marking or numbers, in a quick effort to eliminate duplicates
+
+4. Combined each source to its Screening Flag. That is, whether a particular source was Selected for Screening, or was Excluded (and if so, the reason).
+
+The next step will be to evaluate the remaining possible sources to rule out further possible duplicated sources. To this effect an algorithm called Locality Sensitivity Hashing will be used to examine abstracts that are 90% similar. LSH works by breaking the "document" (each abstract) into overlapping chunks ("n-grams", or "shingles"), and finding the **Jaccard Similarity** (percentage of overlapping shingles) between abstracts
+
+```{r}
+minhash <- minhash_generator(n=200, seed=42)
+
+# Temporary data set consisting of just abstracts long enough to run LSH.
+df_clean <- df |> 
+    # Need to ensure the temp_abstract column has at least 6 words.
+    mutate(wc = str_count(temp_abstract, "\\S+")) |>
+    filter(wc >= 6)
+
+corpus <- TextReuseCorpus(text = df_clean$temp_abstract,
+                          tokenizer = tokenize_ngrams,
+                          n=5,
+                          minhash_func = minhash)
+names(corpus) = df_clean$index
+
+buckets <- lsh(corpus, bands=40)
+
+candidates <- lsh_candidates(buckets)
+
+# Scoring the duplicates to flag 90% similarity
+duplicate_pairs <- lsh_compare(candidates, corpus, jaccard_similarity) |> filter(score > 0.90)
+
+# For each pair returned, 
+# 1. If one is already flagged as 'duplicated', select that.
+# 2. Otherwise, find which one of the pair has the shorter abstract length.
+duplicate_pairs <- duplicate_pairs |>
+    mutate(a=as.double(a), b=as.double(b)) |>
+    left_join(df |> select(index, Outcome, abs_len), by=c("a"="index")) |> rename(len_a = abs_len, flag_a = Outcome) |>
+    left_join(df |> select(index, Outcome, abs_len), by=c("b"="index")) |> rename(len_b = abs_len, flag_b = Outcome) |>
+    mutate(Reject = case_when(
+        flag_a == "Excluded: Duplicate" ~ a,
+        flag_b == "Excluded: Duplicate" ~ b,
+        len_a <= len_b ~ a,
+        len_b <= len_a ~ b,
+        .default = NA
+    ))
+```
+
+## Production of cleaned data set
+
+The "rejected for duplicate" lines will be produced here, 
+
+```{r}
+# Filter out the rejected lines.
+df <- df |>
+    filter(!(index %in% duplicate_pairs$Reject)) |>
+    select(-temp_abstract, -clean_title, -temp_lastnames, -abs_len)
+
+# Save this data set as an RDS.
+saveRDS(df, file="cleaned_input.rds")
+```
