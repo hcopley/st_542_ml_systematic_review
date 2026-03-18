@@ -37,23 +37,26 @@ Create stratified 5-fold CV splits using `createFolds()` from the `caret` packag
 # Load cleaned abstracts and labels; assign a row ID to each record
 # str_squish() collapses embedded \n, \r\n, \t to single spaces so that
 # the text field is single-line and safe for CSV/Python parsing
-abstracts <- read_csv(here('04_output', 'test_data.csv')) %>%
+abstracts <- readRDS(here('02_data_prep', 'cleaned_input.rds')) %>%
+    mutate(outcome = if_else(Outcome == 'Selected for Screening', 1, 0)) %>%
     rowid_to_column('id') %>%
-    select(id, text, recd_screen) %>%
-    mutate(text = str_squish(text))
+    select(id, title, abstract, outcome) %>%
+    unite(col = 'text', c(title, abstract), sep = ' ') %>%
+    mutate(text = str_squish(text)) %>%
+    arrange(id)
 
 # Set seed for reproducibility
 set.seed(42)
 
 # Create stratified 5-fold CV splits
 # folds[[k]] contains the row indices (= id values) for the test set of fold k
-folds <- createFolds(abstracts$recd_screen, k = 5, list = TRUE, returnTrain = FALSE)
+folds <- createFolds(abstracts$outcome, k = 5, list = TRUE, returnTrain = FALSE)
 
 # Check stratification across folds
 map_dfr(seq_along(folds), ~ tibble(
   fold     = .x,
   n        = length(folds[[.x]]),
-  pos_rate = mean(abstracts$recd_screen[folds[[.x]]])
+  pos_rate = mean(abstracts$outcome[folds[[.x]]])
 ))
 
 # Save folds object for use in model_comparison.qmd
@@ -61,6 +64,7 @@ saveRDS(folds, here('04_output', 'cv_folds.rds'))
 
 # Save abstracts for Python embedding generation
 write_csv(abstracts, here('04_output', 'abstracts.csv'))
+
 ```
 
 
@@ -86,8 +90,8 @@ model = SentenceTransformer('NeuML/pubmedbert-base-embeddings')
 embeddings = model.encode(df['text'].tolist(), batch_size=64, show_progress_bar=True)
 
 emb_df = pd.DataFrame(embeddings)
-emb_df.insert(0, 'id', df['id'].values)
-emb_df.insert(1, 'recd_screen', df['recd_screen'].values)
+emb_df.insert(0, 'index', df['index'].values)
+emb_df.insert(1, 'outcome', df['outcome'].values)
 
 emb_df.to_csv('pubmedbert_embeddings.csv', index=False)
 print(f"Final embeddings shape: {emb_df.shape}")
@@ -98,6 +102,8 @@ print(f"Final embeddings shape: {emb_df.shape}")
 ```{r load_bert}
 # Read back the full embeddings matrix with label column
 pubmedbert <- read_csv(here('04_output', 'pubmedbert_embeddings.csv'))
+save(pubmedbert, file = here('04_output','pubmedbert_embeddings.rds'))
+
 ```
 
 
@@ -253,14 +259,14 @@ for (fold_index in 1:5) {
 
   # Store test-fold matrix with metadata
   tfidf_test_list[[fold_index]] <- as.data.frame(as.matrix(dfm_test_tfidf)) %>%
-      mutate(id          = df_test$id,
-             recd_screen = df_test$recd_screen,
+      mutate(index          = df_test$index,
+             outcome = df_test$outcome,
              .before     = 1)
 }
 
 # Assemble full-dataset TF-IDF matrix, sorted by id
 tfidf_full <- bind_rows(tfidf_test_list) %>%
-    arrange(id)
+    arrange(index)
 
 write_csv(tfidf_full, here('04_output', 'tfidf_features.csv'))
 ```
@@ -344,8 +350,8 @@ for (fold_index in 1:5) {
 
   # Store with metadata -- row order matches df_test
   doc2vec_test_list[[fold_index]] <- as.data.frame(test_embeddings) %>%
-      mutate(id          = df_test$id,
-             recd_screen = df_test$recd_screen,
+      mutate(id       = df_test$id,
+             outcome = df_test$outcome,
              .before     = 1)
 }
 
@@ -354,6 +360,11 @@ doc2vec_full <- bind_rows(doc2vec_test_list) %>%
     arrange(id)
 
 write_csv(doc2vec_full, here('04_output', 'doc2vec_features.csv'))
+
+save(doc2vec_full, file = here('04_output', 'doc2vec_features.rds'))
+
+
+
 
 ```
 
