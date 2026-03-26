@@ -24,6 +24,7 @@ library(caret)
 library(quanteda)
 library(here)
 library(reticulate)
+library(janitor)
 use_condaenv('r-gensim', required = TRUE)
 ```
 
@@ -101,7 +102,9 @@ print(f"Final embeddings shape: {emb_df.shape}")
 
 ```{r load_bert}
 # Read back the full embeddings matrix with label column
-pubmedbert <- read_csv(here('04_output', 'pubmedbert_embeddings.csv'))
+pubmedbert <- read_csv(here('04_output', 'pubmedbert_embeddings.csv')) %>%
+    clean_names()
+
 save(pubmedbert, file = here('04_output','pubmedbert_embeddings.rds'))
 
 ```
