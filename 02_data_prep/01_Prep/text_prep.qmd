@@ -25,6 +25,7 @@ library(quanteda)
 library(here)
 library(reticulate)
 library(janitor)
+library(irlba)
 use_condaenv('r-gensim', required = TRUE)
 ```
 
@@ -105,14 +106,16 @@ print(f"Final embeddings shape: {emb_df.shape}")
 pubmedbert <- read_csv(here('04_output', 'pubmedbert_embeddings.csv')) %>%
     clean_names()
 
-save(pubmedbert, file = here('04_output','pubmedbert_embeddings.rds'))
+saveRDS(pubmedbert, file = here('04_output','pubmedbert_embeddings.rds'))
 
 ```
 
 
-## Method 2: TF-IDF
+## Method 2: TF-IDF + LSA
 
-TF-IDF (Term Frequency-Inverse Document Frequncy) is a numerical text representation that weights each word by how frequently it appears in a document relative to how commonly it appears across all documents. Words that are distinctive to a particular document receive higher weights; words that appear in nearly every document receive lower weights. The output is a sparse matrix with one row per document and one column per term.
+TF-IDF (Term Frequency-Inverse Document Frequncy) is a numerical text representation that weights each word by how frequently it appears in a document relative to how commonly it appears across all documents. Words that are distinctive to a particular document receive higher weights; words that appear in nearly every document receive lower weights. The output is a sparse matrix with one row per document and one column per term. Each value in the matrix represents: 
+
+$$\text{TF-IDF} = \text{word count in document} \times \log_{10}\left(\frac{n_{\text{documents}}}{n_{\text{documents with term}}}\right)$$
 
 TF-IDF features are computed in R using the `quanteda` package. To prevent data leakage, both the vocabulary and IDF weights are learned from the training fold only. `dfm_match()` aligns the test fold feature set to the training vocabulary, and `dfm_weight()` applies training-fold IDF weights to the test fold matrix. Test-fold feature matrices are assembled into a single full-dataset matrix after the fold loop.
 
@@ -122,13 +125,19 @@ Preprocessing steps:
 
 -   Tokenization
 -   Lowercase
--   Remove punctuation, numbers, symbols
+-   Remove punctuation, numbers, symbols (dashes kept, emdashes removed)
 -   Remove stopwords (Snowball English list)
 -   Stem words (Porter algorithm)
 
+
 ```{r tfidf_function, eval = TRUE}
 # TF-IDF preprocessing function
+
 preprocess_tfidf <- function(texts) {
+    
+  #remove emdashes    
+  texts <- str_replace_all(texts, "—", " ")
+  
   tokens(texts,
          remove_punct   = TRUE,
          remove_numbers = TRUE,
@@ -139,6 +148,8 @@ preprocess_tfidf <- function(texts) {
     dfm()
 }
 ```
+
+
 
 ```{r min_elbow_plot, eval = TRUE}
 # Build DFM on full corpus to explore vocabulary size vs. min_docfreq threshold
@@ -169,6 +180,12 @@ ggplot(vocab_diag, aes(x = min_docfreq, y = n_terms)) +
 # Two-column table: terms dropped at min_df = 5 vs min_df = 10
 doc_freqs <- docfreq(dfm_full)
 
+term_frequency <- data.frame('n_documents' = doc_freqs) %>%
+    rownames_to_column('term') %>%
+    arrange(n_documents)
+
+write.csv(term_frequency, here("04_output", "term_frequency.csv"), row.names = FALSE)
+
 dropped_5  <- tibble(term = names(doc_freqs), docfreq = as.integer(doc_freqs)) %>%
   filter(docfreq < 5) %>%
   arrange(desc(docfreq)) %>%
@@ -190,7 +207,7 @@ tibble(
 ```{r max_elbow_plot, eval = TRUE}
 # Max_df elbow plot: vocabulary retained as high-frequency terms are removed
 max_df_diag <- map_dfr(
-  c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.50, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99, 1.0),
+    seq(.1,1, by = .02),
   ~ tibble(
     max_docfreq_pct = .x,
     n_terms = nfeat(dfm_trim(dfm_full, max_docfreq = .x, docfreq_type = "prop"))
@@ -214,7 +231,13 @@ ggplot(max_df_diag, aes(x = max_docfreq_pct, y = n_terms)) +
 max_thresh_1 <- 0.30  # placeholder: update after viewing elbow plot
 max_thresh_2 <- 0.20  # placeholder: update after viewing elbow plot
 
-prop_freqs <- docfreq(dfm_full) / ndoc(dfm_full)
+prop_freqs <- docfreq(dfm_full) / ndoc(dfm_full) 
+
+term_props <- data.frame('prop'= prop_freqs) %>%
+    rownames_to_column('term') %>%
+    inner_join(term_frequency, by = c('term')) %>%
+    arrange(-prop)
+    
 
 dropped_max_1 <- names(prop_freqs[prop_freqs > max_thresh_1]) %>%
   head(50)
@@ -234,13 +257,141 @@ tibble(
 
 ```
 
+The scree plot shows the cumulative proportion of variance in the TF-IDF matrix explained
+by each successive SVD component, computed from a single fit on the full corpus outside
+the fold loop. Each component captures the next largest direction of variation in the
+document-term space; the singular values `svd_fit$d` are proportional to the amount of
+variance explained, and squaring them gives the variance contribution per dimension.
+The plot is used to inform the choice of `n_components`: an elbow in the curve indicates
+that additional components contribute diminishing returns. Note that for heterogeneous
+text corpora, this curve is often gradual with no sharp elbow, reflecting the fact that
+variance is spread across many latent topics rather than concentrated in a few dominant
+dimensions. In that case, `n_components` can be treated as a hyperparameter and evaluated
+empirically in `model_comparison.qmd`.
 
-```{r tfidf_folds}
-# List to collect test-fold feature matrices in row order
-tfidf_test_list <- vector("list", 5)
+
+```{r svd_scree_plot, eval = TRUE}
+# Fit SVD on the full training corpus (outside the fold loop) just for diagnostics
+# Using larger nv than planning to keep so you can see where it level
+dfm_diag <- preprocess_tfidf(abstracts$text) %>%
+  dfm_trim(min_docfreq = 5)
+
+idf_diag    <- docfreq(dfm_diag, scheme = "inverse", base = 10)
+tfidf_diag  <- dfm_weight(dfm_diag, weights = idf_diag)
+mat_diag    <- as(tfidf_diag, "sparseMatrix")
+
+svd_diag <- irlba(mat_diag, nv = 150, center = FALSE, scale = FALSE)
+
+# Proportion of variance explained by each component
+var_explained <- svd_diag$d^2 / sum(svd_diag$d^2)
+cumvar        <- cumsum(var_explained)
+
+tibble(component = seq_along(var_explained),
+       var       = var_explained,
+       cumvar    = cumvar) %>%
+  ggplot(aes(x = component)) +
+  geom_line(aes(y = cumvar)) +
+  geom_point(aes(y = cumvar), size = 0.8) +
+  geom_hline(yintercept = c(0.50, 0.75, 0.90), linetype = "dashed", colour = "grey50") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title    = "Cumulative variance explained by truncated SVD",
+       subtitle = "Dashed lines at 50%, 75%, 90%",
+       x        = "Number of components",
+       y        = "Cumulative variance explained") +
+  theme_minimal()
+```
+
+The 2D scatter plot projects all documents onto the first two SVD dimensions and colors
+points by screening label, providing a direct visual assessment of whether the latent
+space separates included from excluded records. The first two dimensions are the directions
+of greatest variance in the training corpus and are not guaranteed to be the most
+discriminating for the classification task; visible separation here is a positive signal
+but its absence does not rule out useful structure in higher dimensions. Because included
+records are a small minority of the corpus, overplotting among the excluded class is
+expected — the key pattern to look for is whether included records cluster directionally
+or occupy a distinct region rather than being uniformly scattered among excluded records.
+
+
+```{r, eval = TRUE}
+# ---- 2D scatter plot ----
+# Projects all documents onto the first two SVD dimensions, coloured by label.
+# as.matrix() is applied to the small output matrix (n_docs x 2), not the
+# large input -- this is safe and necessary to coerce from dgeMatrix.
+proj_2d <- as.matrix(mat_diag %*% svd_diag$v[, 1:2]) %>%
+  as.data.frame() %>%
+  setNames(c("dim1", "dim2")) %>%
+  mutate(label = factor(abstracts$outcome,
+                        levels = c(0, 1),
+                        labels = c("Excluded", "Included")))
+
+ggplot(proj_2d, aes(x = dim1, y = dim2, colour = label)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  scale_colour_manual(values = c("Excluded" = "grey60", "Included" = "#E05C2A")) +
+  labs(title  = "SVD projection: top 2 dimensions",
+       x      = "SVD Dimension 1",
+       y      = "SVD Dimension 2",
+       colour = NULL) +
+  theme_minimal()
+```
+
+
+The density plot displays the distribution of document scores along the single SVD
+dimension that most separates the two classes, identified by computing the absolute
+difference in class means across all retained dimensions and selecting the largest. Unlike
+the scatter plot, which is restricted to the top two variance dimensions, this plot
+specifically targets the dimension most relevant to the classification task and therefore
+gives a more direct assessment of whether the SVD representation captures signal useful
+for screening. Well-separated density curves indicate that the SVD space encodes
+meaningful differences between included and excluded abstracts along at least one
+dimension; heavy overlap suggests the representation may not carry strong discriminative
+signal for this task regardless of how many components are retained.
+
+```{r, eval = TRUE}
+# ---- Density plot ----
+# Identifies the single SVD dimension that most separates the two classes
+# by computing the absolute difference in class means across all retained
+# dimensions. Plots density curves for included vs excluded along that dimension.
+proj_full <- as.matrix(mat_diag %*% svd_diag$v) %>%
+  as.data.frame() %>%
+  mutate(label = abstracts$outcome)
+
+mean_diffs <- proj_full %>%
+  group_by(label) %>%
+  summarise(across(starts_with("V"), mean)) %>%
+  summarise(across(starts_with("V"), ~ abs(diff(.)))) %>%
+  pivot_longer(everything(), names_to = "dim", values_to = "mean_diff") %>%
+  arrange(desc(mean_diff))
+
+best_dim <- mean_diffs$dim[1]
+cat("Most discriminating dimension:", best_dim, "\n")
+
+proj_full %>%
+  mutate(label = factor(label, levels = c(0, 1),
+                        labels = c("Excluded", "Included"))) %>%
+  ggplot(aes(x = .data[[best_dim]], fill = label)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("Excluded" = "grey60", "Included" = "#E05C2A")) +
+  labs(title = paste("Density along most discriminating SVD dimension:", best_dim),
+       x     = "Projection score",
+       y     = "Density",
+       fill  = NULL) +
+  theme_minimal()
+```
+
+
+```{r tfidf_svd_folds, eval = FALSE}
+
+# Number of latent dimensions to retain.
+# 100 components selected based on scree plot inspection --
+# captures ~90% of corpus variance for this collection.
+# Can be treated as a tunable hyperparameter in model_comparison.qmd.
+n_components <- 100
+
+# List to collect test-fold SVD projections in row order
+svd_test_list <- vector("list", 5)
 
 for (fold_index in 1:5) {
-  cat(sprintf("\n== TF-IDF Fold %d ==\n", fold_index))
+  cat(sprintf("\n== TF-IDF + SVD Fold %d ==\n", fold_index))
 
   test_idx  <- folds[[fold_index]]
   train_idx <- setdiff(seq_len(nrow(abstracts)), test_idx)
@@ -248,30 +399,65 @@ for (fold_index in 1:5) {
   df_train <- abstracts[train_idx, ]
   df_test  <- abstracts[test_idx, ]
 
-  # Learn vocabulary from training fold; trim rare terms; apply to test fold
-  # min_docfreq = 5 drops terms appearing in fewer than 5 training documents,
-  # keeping vocabulary manageable and avoiding sparse/noisy features
+  # Compute min_docfreq proportion from training fold only
+  min_doc_prop <- term_props %>%
+    filter(n_documents <= 5) %>%
+    pull(prop) %>%
+    max()
+
+  
+  
+  # Step 1: Build TF-IDF matrices using training-fold vocabulary and IDF weights.
+  # dfm_match() aligns the test matrix to the training column layout:
+  #   - drops test words absent from the training vocabulary (no loading in V)
+  #   - inserts zero-columns for training words absent from the test fold
+  # After this, both matrices have identical columns in identical order,
+  # which is required for the SVD projection in Step 3 to be valid.
   dfm_train <- preprocess_tfidf(df_train$text) %>%
-      dfm_trim(min_docfreq = 5)
-  dfm_test  <- preprocess_tfidf(df_test$text) %>%
-      dfm_match(features = featnames(dfm_train))
+    dfm_trim(min_docfreq = min_doc_prop,
+             max_docfreq = 0.25,
+             docfreq_type = "prop")
 
-  # Apply TF-IDF weighting using training-corpus IDF (prevents leakage)
-  idf_train      <- docfreq(dfm_train, scheme = "inverse", base = 10)
-  dfm_test_tfidf <- dfm_weight(dfm_test, weights = idf_train)
+  dfm_test <- preprocess_tfidf(df_test$text) %>%
+    dfm_match(features = featnames(dfm_train))
 
-  # Store test-fold matrix with metadata
-  tfidf_test_list[[fold_index]] <- as.data.frame(as.matrix(dfm_test_tfidf)) %>%
-      mutate(index          = df_test$index,
-             outcome = df_test$outcome,
-             .before     = 1)
+  idf_train       <- docfreq(dfm_train, scheme = "inverse", base = 10)
+  dfm_train_tfidf <- dfm_weight(dfm_train, weights = idf_train)
+  dfm_test_tfidf  <- dfm_weight(dfm_test,  weights = idf_train)  # training IDF on test
+
+  # Convert to sparse matrices -- irlba handles sparse input natively.
+  # as.matrix() is intentionally avoided here; the full term matrix is too
+  # large to densify (~70k terms). Only the small output projections are dense.
+  mat_train <- as(dfm_train_tfidf, "sparseMatrix")
+  mat_test  <- as(dfm_test_tfidf,  "sparseMatrix")
+
+  # Step 2: Fit truncated SVD on the TRAINING fold only.
+  # irlba() returns u (document scores), d (singular values), v (term loadings).
+  # v encodes what each latent dimension means in terms of original terms.
+  # It is estimated from training data only and never updated after this point.
+  svd_fit <- irlba(mat_train, nv = n_components, center = FALSE, scale = FALSE)
+
+  # Step 3: Project the TEST fold using FROZEN term loadings (v).
+  # mat_test columns are aligned to mat_train columns by dfm_match() above,
+  # so each column multiplies against the correct term loading in v.
+  # Test documents have no influence on what the latent dimensions represent.
+  test_proj <- as.matrix(mat_test %*% svd_fit$v)  # shape: n_test x n_components
+
+  # Store test-fold projections with metadata
+  svd_test_list[[fold_index]] <- as.data.frame(test_proj) %>%
+    setNames(paste0("svd_", seq_len(n_components))) %>%
+    mutate(id   = df_test$id,
+           outcome = df_test$outcome,
+           .before = 1)
 }
 
-# Assemble full-dataset TF-IDF matrix, sorted by id
-tfidf_full <- bind_rows(tfidf_test_list) %>%
-    arrange(index)
+# Assemble full-dataset SVD matrix, sorted by index
+svd_full <- bind_rows(svd_test_list) %>%
+  arrange(id)
 
-write_csv(tfidf_full, here('04_output', 'tfidf_features.csv'))
+saveRDS(svd_full, file = here('04_output', 'tfidf_svd_features.rds'))
+
+write_csv(svd_full, here('04_output', 'tfidf_svd_features.csv'))
 ```
 
 
@@ -364,7 +550,7 @@ doc2vec_full <- bind_rows(doc2vec_test_list) %>%
 
 write_csv(doc2vec_full, here('04_output', 'doc2vec_features.csv'))
 
-save(doc2vec_full, file = here('04_output', 'doc2vec_features.rds'))
+saveRDS(doc2vec_full, file = here('04_output', 'doc2vec_features.rds'))
 
 
 
