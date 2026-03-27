@@ -382,10 +382,10 @@ proj_full %>%
 ```{r tfidf_svd_folds, eval = FALSE}
 
 # Number of latent dimensions to retain.
-# 100 components selected based on scree plot inspection --
-# captures ~90% of corpus variance for this collection.
+# 150 components selected based on scree plot inspection --
+# captures over 90% of corpus variance for this collection.
 # Can be treated as a tunable hyperparameter in model_comparison.qmd.
-n_components <- 100
+n_components <- 150
 
 # List to collect test-fold SVD projections in row order
 svd_test_list <- vector("list", 5)
