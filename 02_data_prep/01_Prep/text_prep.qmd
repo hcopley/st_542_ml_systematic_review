@@ -33,7 +33,7 @@ use_condaenv('r-gensim', required = TRUE)
 
 ## 1: Set up for 5-Fold Cross Validation
 
-Create stratified 5-fold CV splits using `createFolds()` from the `caret` package, stratifying on `recd_screen` to ensure each fold has approximately the same proportion of positive cases. The `folds` list is saved as an `.rds` file so the same fold assignments can be reused in `model_comparison.qmd`.
+Create stratified 5-fold CV splits using `createFolds()` from the `caret` package, stratifying on `outcome` to ensure each fold has approximately the same proportion of positive cases. The `folds` list is saved as an `.rds` file so the same fold assignments can be reused in `model_comparison.qmd`.
 
 ```{r load_cleaned_abstracts, eval = TRUE}
 # Load cleaned abstracts and labels; assign a row ID to each record
@@ -392,6 +392,15 @@ svd_test_list <- vector("list", 5)
 
 for (fold_index in 1:5) {
   cat(sprintf("\n== TF-IDF + SVD Fold %d ==\n", fold_index))
+    
+  # test_idx:  the ~20% of records held out this iteration
+  # train_idx: the remaining ~80% used to fit everything
+  #
+  # fold_index=1: test=fold1, train=folds2+3+4+5
+  # fold_index=2: test=fold2, train=folds1+3+4+5
+  # fold_index=3: test=fold3, train=folds1+2+4+5
+  # fold_index=4: test=fold4, train=folds1+2+3+5
+  # fold_index=5: test=fold5, train=folds1+2+3+4
 
   test_idx  <- folds[[fold_index]]
   train_idx <- setdiff(seq_len(nrow(abstracts)), test_idx)
