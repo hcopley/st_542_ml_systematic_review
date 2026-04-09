@@ -409,10 +409,10 @@ for (fold_index in 1:5) {
   df_test  <- abstracts[test_idx, ]
 
   # Compute min_docfreq proportion from training fold only
-  min_doc_prop <- term_props %>%
-    filter(n_documents <= 5) %>%
-    pull(prop) %>%
-    max()
+  #min_doc_prop <- term_props %>%
+   # filter(n_documents <= 5) %>%
+   # pull(prop) %>%
+   # max()
 
   
   
@@ -422,10 +422,10 @@ for (fold_index in 1:5) {
   #   - inserts zero-columns for training words absent from the test fold
   # After this, both matrices have identical columns in identical order,
   # which is required for the SVD projection in Step 3 to be valid.
-  dfm_train <- preprocess_tfidf(df_train$text) %>%
-    dfm_trim(min_docfreq = min_doc_prop,
-             max_docfreq = 0.25,
-             docfreq_type = "prop")
+  dfm_train <- preprocess_tfidf(df_train$text) # %>%
+    #dfm_trim(min_docfreq = min_doc_prop,
+    #         max_docfreq = 0.25,
+     #        docfreq_type = "prop")
 
   dfm_test <- preprocess_tfidf(df_test$text) %>%
     dfm_match(features = featnames(dfm_train))
