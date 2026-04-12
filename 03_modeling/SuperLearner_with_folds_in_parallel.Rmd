@@ -40,6 +40,7 @@ library(xgboost)
 library(glmnet) # Explicitly load glmnet
 library(e1071)  # For SL.svm (even if commented out in learners, good practice)
 library(randomForest)
+#library(naivebayes)
 library(data.table)
 library(PRROC)
 library(pROC)
@@ -92,17 +93,23 @@ SL.svm.custom <- function(Y, X, newX, family, obsWeights, ...) {
   pred <- attr(pred, "probabilities")[, "1"]
   return(list(pred = pred, fit = fit))
 }
+
+SL.naivebayes.custom <- function(Y, X, newX, family, obsWeights, ...) {
+  library(naivebayes)
+  fit <- naive_bayes(x = X, y = as.factor(Y))
+  pred <- predict(fit, newdata = newX, type = "prob")[, "1"]
+  return(list(pred = pred, fit = fit))
+}
 ```
 
 ### 3. SuperLearner pipeline function with parallel processing
 
 ```{r}
 
-superlearner_parallel_pipeline <- function(.data, cv_folds, run_test_sample = FALSE) {
+superlearner_parallel_pipeline <- function(.data, cv_folds, run_test_sample = FALSE, test_sample_n_cols = 25) {
     
   #stop the previous cluster just in case it is still running from a previous run of the notebook. 
   #This prevents errors about clusters already running and ensures a clean start for parallel processing. 
-    
  if(exists("cl")) {    
   suppressWarnings(stopCluster(cl))   
  }
@@ -114,8 +121,7 @@ superlearner_parallel_pipeline <- function(.data, cv_folds, run_test_sample = FA
   if(run_test_sample ==TRUE) {
     # For quick testing, use a smaller sample of columns and rows. This is not for final results but can speed up iterations during development.
     set.seed(542)
-    #sample_rows <- sample(nrow(X), min(1000, nrow(X)))
-    sample_columns <- sample(ncol(X), min(25, ncol(X)))
+    sample_columns <- sample(ncol(X), min(test_sample_n_cols, ncol(X)))
    
     X <- X[, sample_columns]
   }
@@ -137,12 +143,12 @@ registerDoParallel(cl)
 #set a seed on each worker to ensure reproducibility across parallel processes
 clusterSetRNGStream(cl, iseed = 42) 
 #send SuperLearner to the cluster workers so they can run the learners in parallel
-clusterEvalQ(cl, library(SuperLearner)) 
+clusterEvalQ(cl, {library(SuperLearner); library(naivebayes)}) 
 #send all necessary objects to each cluster worker so they can run the learners in parallel without errors
 #the envir = environment() argument ensures that the objects are taken from the current environment of the function
 #which is important to avoid issues with object not found errors in the workers as the default is for clusterExport to look in the global environment which may not have the necessary objects when running inside a function.xpor
 clusterExport(cl, list(
-  "Y", "X", "learners", "obs_weights", "cv_folds", "SL.svm.custom" 
+  "Y", "X", "learners", "obs_weights", "cv_folds", "SL.svm.custom", "SL.naivebayes.custom"
 ), envir = environment())
 
 sl_cv <- CV.SuperLearner(
@@ -181,20 +187,23 @@ learners <- c(
   "SL.glmnet",        # Elastic-net logistic (BEST for TF-IDF)
  # "SL.svm",           # Linear SVM
   "SL.xgboost",       # Shallow boosted trees
-  "SL.randomForest",    # Optional, usually lower weight
-  "SL.naivebayes",     # Naive Bayes
-  "SL.svm.custom" # Custom SVM with class weights for imbalance 
+  #"SL.randomForest",    # Optional, usually lower weight
+ "SL.ranger",
+  #"SL.naivebayes.custom",     # Naive Bayes
+  #"SL.svm.custom" # Custom SVM with class weights for imbalance 
+ "SL.ksvm",
+ "SL.bayesglm"
 )
 ```
 
 
 ### 5. Run 5-fold SuperLearner cross-validation on all three feature sets (Doc2Vec, TF-IDF SVD, PubMedBERT) in parallel
 
-- Use run_test_sample = TRUE to test on a sample of 25 columns for faster iteration during development. Set to FALSE for final runs on all features.
+- Use run_test_sample = TRUE to test on a sample of n columns for faster iteration during development. Set to FALSE for final runs on all features.
 
 ```{r run-superlearner}
+doc2vec_res <- superlearner_parallel_pipeline(dt_doc2vec, cv_folds, run_test_sample = TRUE, test_sample_n_cols = 10)
 
-doc2vec_res <- superlearner_parallel_pipeline(dt_doc2vec, cv_folds, run_test_sample = TRUE)
 tfidf_res <- superlearner_parallel_pipeline(dt_tfidf, cv_folds, run_test_sample = TRUE)
 pubmed_res <- superlearner_parallel_pipeline(dt_pubmed, cv_folds, run_test_sample = TRUE)
 
