@@ -94,31 +94,7 @@ SL.svm.custom <- function(Y, X, newX, family, obsWeights, ...) {
 }
 ```
 
-### 3. Define the SuperLearner library
-
-Next we set up the SuperLearner library with our chosen base learners (Including the custom SVM we just defined).
-
-- Logistic regression with elastic net regularization (glmnet).
-- XGBoost
-- Random forest
-- Naive Bayes
-- SVM with class weights (custom)
-
-
-```{r learners}
-# Set learners' library
-learners <- c(
-  "SL.glmnet",        # Elastic-net logistic (BEST for TF-IDF)
- # "SL.svm",           # Linear SVM
-  "SL.xgboost",       # Shallow boosted trees
-  "SL.randomForest",    # Optional, usually lower weight
-  "SL.naiveBayes",     # Naive Bayes
-  "SL.svm.custom" # Custom SVM with class weights for imbalance 
-)
-```
-
-### 3. Define outcome & predictors
-
+### 3. SuperLearner pipeline function with parallel processing
 
 ```{r}
 
@@ -128,7 +104,7 @@ superlearner_parallel_pipeline <- function(.data, cv_folds, run_test_sample = FA
   #This prevents errors about clusters already running and ensures a clean start for parallel processing. 
     
  if(exists("cl")) {    
-  stopCluster(cl)    
+  suppressWarnings(stopCluster(cl))   
  }
     
   # Separate the response from features
@@ -138,10 +114,10 @@ superlearner_parallel_pipeline <- function(.data, cv_folds, run_test_sample = FA
   if(run_test_sample ==TRUE) {
     # For quick testing, use a smaller sample of columns and rows. This is not for final results but can speed up iterations during development.
     set.seed(542)
-    sample_rows <- sample(nrow(X), min(1000, nrow(X)))
+    #sample_rows <- sample(nrow(X), min(1000, nrow(X)))
     sample_columns <- sample(ncol(X), min(25, ncol(X)))
-    Y <- Y[sample_rows]
-    X <- X[sample_rows, sample_columns]
+   
+    X <- X[, sample_columns]
   }
   
   # Ensure that the response is mumeric
@@ -188,19 +164,42 @@ return(sl_cv)
 
 ```
 
-### 4. Run 5-fold SuperLearner cross-validation on TF-IDF SVD features
+### 4. Define the SuperLearner library
 
-```{r}
+Next we set up the SuperLearner library with our chosen base learners (Including the custom SVM we just defined).
+
+- Logistic regression with elastic net regularization (glmnet).
+- XGBoost
+- Random forest
+- Naive Bayes
+- SVM with class weights (custom)
+
+
+```{r learners}
+# Set learners' library
 learners <- c(
-  "SL.glmnet"#,        # Elastic-net logistic (BEST for TF-IDF)
+  "SL.glmnet",        # Elastic-net logistic (BEST for TF-IDF)
  # "SL.svm",           # Linear SVM
-  #"SL.xgboost",       # Shallow boosted trees
- # "SL.randomForest",    # Optional, usually lower weight
- # "SL.naiveBayes",     # Naive Bayes
- # "SL.svm.custom" # Custom SVM with class weights for imbalance 
+  "SL.xgboost",       # Shallow boosted trees
+  "SL.randomForest",    # Optional, usually lower weight
+  "SL.naivebayes",     # Naive Bayes
+  "SL.svm.custom" # Custom SVM with class weights for imbalance 
 )
+```
 
-doc2vec_res <- superlearner_parallel_pipeline(dt_doc2vec, cv_folds, run_test_sample = FALSE)
+
+### 5. Run 5-fold SuperLearner cross-validation on all three feature sets (Doc2Vec, TF-IDF SVD, PubMedBERT) in parallel
+
+- Use run_test_sample = TRUE to test on a sample of 25 columns for faster iteration during development. Set to FALSE for final runs on all features.
+
+```{r run-superlearner}
+
+doc2vec_res <- superlearner_parallel_pipeline(dt_doc2vec, cv_folds, run_test_sample = TRUE)
+tfidf_res <- superlearner_parallel_pipeline(dt_tfidf, cv_folds, run_test_sample = TRUE)
+pubmed_res <- superlearner_parallel_pipeline(dt_pubmed, cv_folds, run_test_sample = TRUE)
+
+doc2vec_res$coef
+
 ```
 
 
