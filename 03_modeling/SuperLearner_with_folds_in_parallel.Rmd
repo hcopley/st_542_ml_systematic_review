@@ -186,13 +186,13 @@ Next we set up the SuperLearner library with our chosen base learners (Including
 learners <- c(
   "SL.glmnet",        # Elastic-net logistic (BEST for TF-IDF)
  # "SL.svm",           # Linear SVM
-  "SL.xgboost",       # Shallow boosted trees
+  "SL.xgboost"       # Shallow boosted trees
   #"SL.randomForest",    # Optional, usually lower weight
- "SL.ranger",
+ #"SL.ranger",
   #"SL.naivebayes.custom",     # Naive Bayes
   #"SL.svm.custom" # Custom SVM with class weights for imbalance 
- "SL.ksvm",
- "SL.bayesglm"
+# "SL.ksvm",
+ #"SL.bayesglm"
 )
 ```
 
@@ -212,109 +212,3 @@ doc2vec_res$coef
 ```
 
 
-### 5. Run 5-fold SuperLearner cross-validation on Doc2Vec features
-
-```{r}
-doc2vec_res <- superlearner_parallel_pipeline(dt_tfidf, cv_folds)
-```
-
-
-### 6. Run 5-fold SuperLearner cross-validation on PubMedBERT embeddings
-
-```{r}
-pubmed_res <- superlearner_parallel_pipeline(df_pubmed, cv_folds)
-```
-
-
-### 7. Inspect ensemble weights
-
-```{r ensemble-weights}
-# Print weights
-sl_cv$SL.weights
-
-# Typical TF-IDF outcome: SL.glmnet: dominant. SL.svm: meaningful.
-# SL.xgboost: smaller but helpful. SL.randomForest: often near zero
-# This is expected and correct.
-```
-
-### 8. Evaluate PR-AUC (preferred for screening)
-
-```{r pr-auc}
-# Sketch PR Curve
-library(PRROC)
-
-pr <- pr.curve(
-  scores.class0 = sl_cv$SL.predict[Y == 1],
-  scores.class1 = sl_cv$SL.predict[Y == 0],
-  curve = TRUE
-)
-
-pr$auc.integral
-```
-
-### 9. Recall-constrained threshold selection (screening-ready)
-
-```{r threshold-selection}
-# Search for recall selection (>=95% recall)
-target_recall <- 0.95
-threshold_grid <- seq(0.01, 0.6, by = 0.005)
-
-recalls <- sapply(threshold_grid, function(t) {
-  pred <- ifelse(sl_cv$SL.predict >= t, 1, 0)
-  sum(pred == 1 & Y == 1) / sum(Y == 1)
-})
-
-best_threshold <- min(threshold_grid[recalls >= target_recall])
-best_threshold
-```
-
-```{r workload-reduction}
-# Workload reduction at that threshold (important result)
-pred_final <- ifelse(sl_cv$SL.predict >= best_threshold, 1, 0)
-workload_reduction <- 1 - mean(pred_final == 1)
-
-workload_reduction
-```
-
-### 10. False negatives (must be audited)
-
-```{r false-negatives}
-# Check false negatives
-false_negatives <- which(Y == 1 & pred_final == 0)
-length(false_negatives)
-```
-
-### 11. Final SuperLearner model (for deployment only)
-
-```{r final-model}
-# Set predict model
-final_sl <- SuperLearner(
-  Y = Y,
-  X = X,
-  SL.library = learners,
-  family = binomial(),
-  obsWeights = obs_weights,
-  method = "method.NNLS"
-)
-```
-
-### 12. Prediction pipeline
-
-```{r prediction-pipeline}
-new_dt <- readRDS("tfidf_svd_features_new.rds")
-X_new <- new_dt[, -c(1, 2), with = FALSE]
-
-pred_prob <- predict(
-  final_sl,
-  newdata = X_new,
-  onlySL = TRUE
-)$pred
-
-pred_label <- ifelse(pred_prob >= best_threshold, 1, 0)
-
-output <- data.table(
-  article_id = new_dt[[1]],
-  prob_include = pred_prob,
-  screen_in = pred_label
-)
-```
