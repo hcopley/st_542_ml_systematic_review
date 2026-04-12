@@ -148,7 +148,7 @@ clusterEvalQ(cl, {library(SuperLearner); library(naivebayes)})
 #the envir = environment() argument ensures that the objects are taken from the current environment of the function
 #which is important to avoid issues with object not found errors in the workers as the default is for clusterExport to look in the global environment which may not have the necessary objects when running inside a function.xpor
 clusterExport(cl, list(
-  "Y", "X", "learners", "obs_weights", "cv_folds", "SL.svm.custom", "SL.naivebayes.custom"
+  "Y", "X", "learners", "obs_weights", "cv_folds"
 ), envir = environment())
 
 sl_cv <- CV.SuperLearner(
