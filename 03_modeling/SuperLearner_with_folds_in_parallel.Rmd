@@ -49,41 +49,32 @@ library(here)
 
 ```
 
+### 1. Load in the Prepared Text Features and CV Folds
+
+First we load in the prepared features from the previous steps.
+
+- TF-IDV SVD features
+- Doc2Vec features
+- PubMedBERT embeddings
+
+We also load in the cross-validation folds created in the data preparation step. This is critical for preventing leakage and ensuring that the cross-validation is properly structured according to the original data splits.
+
 ```{r load-data}
-# Load data
+# Load data from all text preparation methods
 dt_tfidf <- readRDS(here('04_output', "tfidf_svd_features.rds"))
 dt_doc2vec <- readRDS(here('04_output', 'doc2vec_features.rds' ))
 dt_pubmed <- readRDS(here('04_output', 'pubmedbert_embeddings.rds'))
 
+#load in the folds created in the data preparation step. 
 cv_folds <- readRDS(here('04_output',"cv_folds.rds"))
 
 ```
 
-### 3. Define outcome & predictors
+### 2. Custom SVM learner with class weights for imbalance 
 
-```{r outcome-predictors}
-# Separate the response from features
-Y <- dt_tfidf[[2]]
-X <- dt_tfidf[, -c(1, 2)]
-```
-
-```{r coerce-binary}
-# Check that the response is binary
-Y <- as.numeric(Y)
-```
-
-### 4. Compute class weights (almost always necessary)
-
-```{r class-weights}
-# Compute class weights
-pos_rate <- mean(Y == 1)
-neg_rate <- mean(Y == 0)
-
-# Assign inverse class frequency weights to balance the classes
-obs_weights <- ifelse(Y == 1, 1/pos_rate, 1/neg_rate)
-
-# This is crucial for screening recall.
-```
+The default SVM in SuperLearner is a nu-SVM which can perform poorly on imbalanced data. 
+We define a custom C-SVM with class weights to handle the imbalance in our dataset. 
+This is crucial for improving recall, which is our primary concern in screening tasks. 
 
 ```{r custom_svm}
 #use a c-svm instead of the defult nu-svm for better performance on imbalanced data. Also set class weights to handle imbalance
@@ -103,13 +94,22 @@ SL.svm.custom <- function(Y, X, newX, family, obsWeights, ...) {
 }
 ```
 
-### 5. Define TF-IDF-optimized SuperLearner library
+### 3. Define the SuperLearner library
+
+Next we set up the SuperLearner library with our chosen base learners (Including the custom SVM we just defined).
+
+- Logistic regression with elastic net regularization (glmnet).
+- XGBoost
+- Random forest
+- Naive Bayes
+- SVM with class weights (custom)
+
 
 ```{r learners}
 # Set learners' library
 learners <- c(
   "SL.glmnet",        # Elastic-net logistic (BEST for TF-IDF)
-  "SL.svm",           # Linear SVM
+ # "SL.svm",           # Linear SVM
   "SL.xgboost",       # Shallow boosted trees
   "SL.randomForest",    # Optional, usually lower weight
   "SL.naiveBayes",     # Naive Bayes
@@ -117,17 +117,57 @@ learners <- c(
 )
 ```
 
-### 6. Run 5-fold SuperLearner cross-validation
+### 3. Define outcome & predictors
 
-```{r cv-superlearner}
 
-cl <- makeCluster(detectCores() - 1) #set the number of cores
-registerDoParallel(cl) #set up parallel backend
-clusterSetRNGStream(cl, iseed = 42) #set a seed on each worker
-clusterEvalQ(cl, library(SuperLearner)) #send SuperLearner to the cluster workers
+```{r}
+
+superlearner_parallel_pipeline <- function(.data, cv_folds, run_test_sample = FALSE) {
+    
+  #stop the previous cluster just in case it is still running from a previous run of the notebook. 
+  #This prevents errors about clusters already running and ensures a clean start for parallel processing. 
+    
+ if(exists("cl")) {    
+  stopCluster(cl)    
+ }
+    
+  # Separate the response from features
+  Y <- .data[[2]]
+  X <- .data[, -c(1, 2)]
+  
+  if(run_test_sample ==TRUE) {
+    # For quick testing, use a smaller sample of columns and rows. This is not for final results but can speed up iterations during development.
+    set.seed(542)
+    sample_rows <- sample(nrow(X), min(1000, nrow(X)))
+    sample_columns <- sample(ncol(X), min(25, ncol(X)))
+    Y <- Y[sample_rows]
+    X <- X[sample_rows, sample_columns]
+  }
+  
+  # Ensure that the response is mumeric
+  Y <- as.numeric(Y)
+  
+  # Compute class weights
+  pos_rate <- mean(Y == 1)
+  neg_rate <- mean(Y == 0)
+  
+  # Assign inverse class frequency weights to balance the classes
+  obs_weights <- ifelse(Y == 1, 1/pos_rate, 1/neg_rate)
+ 
+  #set the number of cores for parallel processing. We use one less than the total to avoid overloading the system.
+cl <- makeCluster(detectCores() - 1) 
+#set up parallel backend to use the cluster
+registerDoParallel(cl) 
+#set a seed on each worker to ensure reproducibility across parallel processes
+clusterSetRNGStream(cl, iseed = 42) 
+#send SuperLearner to the cluster workers so they can run the learners in parallel
+clusterEvalQ(cl, library(SuperLearner)) 
+#send all necessary objects to each cluster worker so they can run the learners in parallel without errors
+#the envir = environment() argument ensures that the objects are taken from the current environment of the function
+#which is important to avoid issues with object not found errors in the workers as the default is for clusterExport to look in the global environment which may not have the necessary objects when running inside a function.xpor
 clusterExport(cl, list(
-  "Y", "X", "learners", "obs_weights", "cv_folds", "SL.svm.custom" #send all necessary objects to the cluster workers
-))
+  "Y", "X", "learners", "obs_weights", "cv_folds", "SL.svm.custom" 
+), envir = environment())
 
 sl_cv <- CV.SuperLearner(
   Y = Y,
@@ -141,9 +181,42 @@ sl_cv <- CV.SuperLearner(
 )
 
 stopCluster(cl)
+  
+return(sl_cv)
 
-# Produces out-of-fold predictions. Prevents leakage. Suitable for reporting
+}
+
 ```
+
+### 4. Run 5-fold SuperLearner cross-validation on TF-IDF SVD features
+
+```{r}
+learners <- c(
+  "SL.glmnet"#,        # Elastic-net logistic (BEST for TF-IDF)
+ # "SL.svm",           # Linear SVM
+  #"SL.xgboost",       # Shallow boosted trees
+ # "SL.randomForest",    # Optional, usually lower weight
+ # "SL.naiveBayes",     # Naive Bayes
+ # "SL.svm.custom" # Custom SVM with class weights for imbalance 
+)
+
+doc2vec_res <- superlearner_parallel_pipeline(dt_doc2vec, cv_folds, run_test_sample = FALSE)
+```
+
+
+### 5. Run 5-fold SuperLearner cross-validation on Doc2Vec features
+
+```{r}
+doc2vec_res <- superlearner_parallel_pipeline(dt_tfidf, cv_folds)
+```
+
+
+### 6. Run 5-fold SuperLearner cross-validation on PubMedBERT embeddings
+
+```{r}
+pubmed_res <- superlearner_parallel_pipeline(df_pubmed, cv_folds)
+```
+
 
 ### 7. Inspect ensemble weights
 
