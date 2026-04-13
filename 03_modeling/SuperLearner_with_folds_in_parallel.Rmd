@@ -2,11 +2,13 @@
 title: "SuperLearner TI-IDF SVD"
 author: "Heather, Jarrett, Andras"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ## SuperLearner Ensemble
 
-### 1. Overview
+### Overview
 
 Base learners used:
 
@@ -16,7 +18,7 @@ Base learners used:
 - Random forest (optional but weaker here)
 - Naive Bayes (usually weak after SVD -- often drop)
 
-### 2. Install packages and load data
+### Install packages and load data
 
 ```{r install, message=FALSE, warning=FALSE}
 #install.packages(c(
@@ -186,13 +188,13 @@ Next we set up the SuperLearner library with our chosen base learners (Including
 learners <- c(
   "SL.glmnet",        # Elastic-net logistic (BEST for TF-IDF)
  # "SL.svm",           # Linear SVM
-  "SL.xgboost"       # Shallow boosted trees
+  "SL.xgboost",       # Shallow boosted trees
   #"SL.randomForest",    # Optional, usually lower weight
- #"SL.ranger",
+ "SL.ranger",
   #"SL.naivebayes.custom",     # Naive Bayes
   #"SL.svm.custom" # Custom SVM with class weights for imbalance 
-# "SL.ksvm",
- #"SL.bayesglm"
+ "SL.ksvm",
+ "SL.bayesglm"
 )
 ```
 
@@ -203,12 +205,297 @@ learners <- c(
 
 ```{r run-superlearner}
 doc2vec_res <- superlearner_parallel_pipeline(dt_doc2vec, cv_folds, run_test_sample = TRUE, test_sample_n_cols = 10)
-
 tfidf_res <- superlearner_parallel_pipeline(dt_tfidf, cv_folds, run_test_sample = TRUE)
 pubmed_res <- superlearner_parallel_pipeline(dt_pubmed, cv_folds, run_test_sample = TRUE)
 
-doc2vec_res$coef
+#save results
+saveRDS(pubmed_res, file = 'doc2vec_res.rds')
+saveRDS(tfidf_res, file = 'tfidf_res.rds')
+saveRDS(pubmed_res, file = 'pubmed_res.rds')
+```
+
+
+```{r}
+
+pubmed_res <- readRDS(here('04_output', 'pubmed_results.rds'))
+tfidf_res <- readRDS(here('04_output', 'tfidf_results.rds'))
+doc2vec_res <- readRDS(here('04_output', 'doc2vec_results.rds'))
+
+samp_pubmed <- readRDS(here('04_output','samp_pubmed_results.rds'))
 
 ```
 
+```{r}
+
+tfidf_res$coef
+pubmed_res$coef
+doc2vec_res$coef
+
+
+```
+
+## Get WSS@95 and AUC-PR for each feature set
+
+```{r}
+
+# WSS@95: Work Saved over Sampling at 95% recall
+# WSS@95 = TNR at the operating point where recall >= 0.95, minus 0.05
+wss_at_95 <- function(labels, probs) {
+
+  #don't compute metrics for any learners that produced invalid predictions    
+  if (any(is.na(probs))) return(NA)        
+    
+  thresholds <- sort(unique(probs), decreasing = TRUE)
+  
+  for (thresh in thresholds) {
+    predicted_pos <- as.integer(probs >= thresh)
+    recall <- sum(predicted_pos == 1 & labels == 1) / sum(labels == 1)
+    
+    if (recall >= 0.95) {
+      tnr <- sum(predicted_pos == 0 & labels == 0) / sum(labels == 0)
+      return(tnr - 0.05)
+    }
+  }
+  return(NA)  # return NA if 95% recall is never achieved
+}
+
+# AUC-PR: Area under the precision-recall curve
+# Uses the PRROC package which handles class imbalance correctly
+auc_pr <- function(labels, probs) {
+  library(PRROC)
+   
+   #don't compute metrics for any learners that produced invalid predictions     
+  if (any(is.na(probs))) return(NA)
+        
+  pr <- pr.curve(
+    scores.class0 = probs[labels == 1],
+    scores.class1 = probs[labels == 0],
+    curve = FALSE
+  )
+  return(pr$auc.integral)
+}
+
+```
+
+
+```{r}
+# Calculate metrics for each feature set
+# Store results objects and labels in named lists for easy looping
+results_list <- list(
+  tfidf   = tfidf_res,
+  doc2vec = doc2vec_res,
+  pubmed  = pubmed_res
+)
+
+labels_list <- list(
+  tfidf   = as.numeric(dt_tfidf[[2]]),
+  doc2vec = as.numeric(dt_doc2vec[[2]]),
+  pubmed  = as.numeric(dt_pubmed[[2]])
+)
+
+# Loop over all three representations and compute metrics for each learner
+eval_results <- map_dfr(names(results_list), function(rep_name) {
+  res    <- results_list[[rep_name]]
+  Y      <- labels_list[[rep_name]]
+  preds  <- as.data.frame(res$library.predict)
+  
+  # Clean up column names (strip "SL." prefix and "_All" suffix)
+  colnames(preds) <- colnames(preds) %>%
+    str_remove("^SL\\.") %>%
+    str_remove("_All$")
+  
+  # Add ensemble predictions as a column
+  preds$SuperLearner <- as.vector(res$SL.predict)
+  
+  # Compute metrics for each learner
+  map_dfr(colnames(preds), function(learner) {
+    tibble(
+      representation = rep_name,
+      learner        = learner,
+      wss_95         = wss_at_95(Y, preds[[learner]]),
+      auc_pr         = auc_pr(Y, preds[[learner]])
+    )
+  })
+})
+
+# ── Plot 1: WSS@95 bar chart ──────────────────────────────────────────────────
+
+ggplot(eval_results, aes(x = reorder(learner, wss_95), y = wss_95, fill = representation)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "WSS@95 by Learner and Text Representation",
+    x     = "Learner",
+    y     = "WSS@95",
+    fill  = "Representation"
+  ) +
+  theme_minimal()
+
+# ── Plot 2: AUC-PR bar chart ──────────────────────────────────────────────────
+
+ggplot(eval_results, aes(x = reorder(learner, auc_pr), y = auc_pr, fill = representation)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "AUC-PR by Learner and Text Representation",
+    x     = "Learner",
+    y     = "AUC-PR",
+    fill  = "Representation"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Returns the scalar AUC-PR value
+auc_pr <- function(labels, probs) {
+  library(PRROC)
+  if (any(is.na(probs))) return(NA)
+  
+  pr <- pr.curve(
+    scores.class0 = probs[labels == 1],
+    scores.class1 = probs[labels == 0],
+    curve = FALSE
+  )
+  return(pr$auc.integral)
+}
+
+# Returns the curve data for plotting
+get_pr_curve <- function(labels, probs) {
+  library(PRROC)
+  if (any(is.na(probs))) return(NULL)
+  
+  pr <- pr.curve(
+    scores.class0 = probs[labels == 1],
+    scores.class1 = probs[labels == 0],
+    curve = TRUE
+  )
+  
+  as_tibble(pr$curve) %>%
+    rename(recall = V1, precision = V2)
+}
+
+# Build curve data for all learners and representations
+curve_data <- map_dfr(names(results_list), function(rep_name) {
+  res   <- results_list[[rep_name]]
+  Y     <- labels_list[[rep_name]]
+  preds <- as.data.frame(res$library.predict)
+  
+  colnames(preds) <- colnames(preds) %>%
+    str_remove("^SL\\.") %>%
+    str_remove("_All$")
+  
+  preds$SuperLearner <- as.vector(res$SL.predict)
+  
+  map_dfr(colnames(preds), function(learner) {
+    curve <- get_pr_curve(Y, preds[[learner]])
+    if (is.null(curve)) return(NULL)
+    curve %>% mutate(representation = rep_name, learner = learner)
+  })
+})
+
+# Plot: one facet per representation, one line per learner
+p <- ggplot(curve_data, aes(x = recall, y = precision, 
+                       color = representation, 
+                       linetype = learner)) +
+  geom_line() +
+  labs(
+    title = "Precision-Recall Curves",
+    x     = "Recall",
+    y     = "Precision",
+    color    = "Text Representation",
+    linetype = "Learner"
+  ) +
+  theme_minimal()
+
+library(plotly)
+ggplotly(p)
+
+
+```
+
+```{r}
+# ── Calibration plot function ─────────────────────────────────────────────────
+
+calibration_plot <- function(labels, probs, title = "Calibration Plot", n_bins = 10) {
+  if (any(is.na(probs))) return(NULL)
+  
+  df <- tibble(prob = probs, outcome = labels)
+  
+  # Quantile-based binning to ensure positive cases in each bin
+  df$bin <- cut(df$prob, 
+                breaks = quantile(df$prob, probs = seq(0, 1, length.out = n_bins + 1)),
+                include.lowest = TRUE)
+  
+  cal_data <- df %>%
+    group_by(bin) %>%
+    summarise(
+      mean_predicted = mean(prob),
+      mean_observed  = mean(outcome),
+      n              = n()
+    )
+  
+  ggplot(cal_data, aes(x = mean_predicted, y = mean_observed)) +
+    geom_point(aes(size = n)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+    xlim(0, 1) + ylim(0, 1) +
+    labs(
+      title = title,
+      x     = "Mean Predicted Probability",
+      y     = "Observed Event Rate"
+    ) +
+    theme_minimal()
+}
+
+# ── Threshold at 95% recall ───────────────────────────────────────────────────
+
+threshold_at_95 <- function(labels, probs) {
+  if (any(is.na(probs))) return(NA)
+  
+  thresholds <- sort(unique(probs), decreasing = TRUE)
+  for (thresh in thresholds) {
+    predicted_pos <- as.integer(probs >= thresh)
+    recall <- sum(predicted_pos == 1 & labels == 1) / sum(labels == 1)
+    if (recall >= 0.95) return(thresh)
+  }
+  return(NA)
+}
+
+# ── Generate calibration plots and thresholds for best model per representation ──
+
+best_per_method <- eval_results %>%
+  filter(!is.na(wss_95)) %>%
+  group_by(representation) %>%
+  slice_max(wss_95, n = 1)
+
+print(best_per_method)
+
+for (rep_name in names(results_list)) {
+  res   <- results_list[[rep_name]]
+  Y     <- labels_list[[rep_name]]
+  preds <- as.data.frame(res$library.predict)
+  
+  colnames(preds) <- colnames(preds) %>%
+    str_remove("^SL\\.") %>%
+    str_remove("_All$")
+  
+  preds$SuperLearner <- as.vector(res$SL.predict)
+  
+  best_learner <- best_per_method %>%
+    filter(representation == rep_name) %>%
+    pull(learner)
+  
+  best_probs <- preds[[best_learner]]
+  
+  # Calibration plot
+  p <- calibration_plot(
+    Y, best_probs,
+    title = paste("Calibration:", rep_name, "+", best_learner)
+  )
+  print(p)
+  
+  # Threshold at 95% recall
+  thresh <- threshold_at_95(Y, best_probs)
+  cat(sprintf("%s + %s: threshold at 95%% recall = %.4f\n", rep_name, best_learner, thresh))
+}
+```
 
