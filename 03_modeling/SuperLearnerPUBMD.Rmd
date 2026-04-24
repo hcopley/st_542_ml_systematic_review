@@ -1,0 +1,332 @@
+---
+title: "SuperLearner PubMedBERT Embedding"
+author: "Heather, Jarrett, Andras"
+output: html_document
+---
+
+## Packages and Data
+
+### 1. Install & load packages
+
+```{r install, message=FALSE, warning=FALSE}
+# Install packages
+#install.packages(c(
+#  "SuperLearner",
+#  "glmnet",
+#  "e1071",
+#  "xgboost",
+#  "randomForest",
+#  "naivebayes",
+#  "data.table"
+#))
+
+library(SuperLearner)
+library(data.table)
+```
+
+```{r load-kernlab, message=FALSE, warning=FALSE}
+# Load other libraries
+library(kernlab)
+```
+
+```{r set-seed}
+# Set seed to ensure reproducibility
+set.seed(542)
+```
+
+### 2. Load PubMedBERT embeddings
+
+```{r load-data}
+# Load the data
+data <- readRDS("pubmedbert_embeddings.rds")
+```
+
+```{r outcome-predictors}
+# Prepare the response (Y) and predictors (X)
+Y <- data[, 2]
+X <- as.data.frame(data[, -2])
+```
+
+## Base Learners Individually
+
+### Logistic Regression Base Learner
+
+```{r lr-library}
+# Define the base learner (Logistic Regression)
+sl_library <- c("SL.glm")
+```
+
+```{r lr-cv}
+# Run the Cross-Validated SuperLearner
+set.seed(542) # For reproducibility
+cv_sl <- CV.SuperLearner(
+  Y = Y,
+  X = X,
+  family = binomial(),     # Use binomial for binary classification (screening)
+  SL.library = sl_library,
+  cvControl = list(V = 5), # 5-fold cross-validation
+  method = "method.NNLS"   # Non-negative least squares to find optimal weights
+)
+
+# View the results
+summary(cv_sl)
+```
+
+### Support Vector Machine Base Learner
+
+```{r svm-cv}
+# Create a custom SVM with a linear kernel
+SL.ksvm.linear <- function(...) {
+  SL.ksvm(..., kernel = "vanilladot") # 'vanilladot' is linear in kernlab
+}
+
+# Add it to library
+sl_library <- c("SL.ksvm.linear")
+
+# Run the Cross-Validated SuperLearner
+set.seed(542)
+cv_sl <- CV.SuperLearner(
+  Y = Y,
+  X = X,
+  family = binomial(),
+  SL.library = sl_library,
+  cvControl = list(V = 5),
+  method = "method.NNLS"
+)
+
+# Compare performance
+summary(cv_sl)
+plot(cv_sl) # Visual comparison of risk (MSE) for each learner
+```
+
+### XGBoost Base Learner
+
+```{r xgb-cv}
+# SL.xgboost default: ntrees = 1000, max_depth = 4, shrinkage = 0.1
+sl_library <- c("SL.xgboost")
+
+# Optional: Create custom XGBoost configurations (Hyperparameter Tuning)
+SL.xgb.shallow <- function(...) SL.xgboost(..., max_depth = 2, ntrees = 500)
+sl_library <- c(sl_library, "SL.xgb.shallow")
+
+# Run the Cross-Validated SuperLearner
+set.seed(542)
+cv_sl <- CV.SuperLearner(
+  Y = Y,
+  X = X,
+  family = binomial(),     # Necessary for binary full-text screening
+  SL.library = sl_library,
+  cvControl = list(V = 5), # 5-fold cross-validation
+  method = "method.NNLS"
+)
+
+# Evaluate Results
+summary(cv_sl)
+```
+
+### Naive Bayes Base Learner
+
+*(Add Naive Bayes learner setup here as needed.)*
+
+## SuperLearner Ensemble
+
+### Convert data for the ensemble
+
+```{r convert-data}
+# Convert to data.table for speed
+dt <- data
+dt <- as.data.table(dt)
+```
+
+### 3. Separate outcome and predictors
+
+```{r ensemble-outcome-predictors}
+Y <- dt[[2]]
+X <- dt[, -c(1, 2), with = FALSE]
+```
+
+### 4. Define SuperLearner base learners
+
+```{r ensemble-learners}
+learners <- c(
+  "SL.glm",           # Logistic Regression
+  "SL.svm",           # Support Vector Machine
+  "SL.xgboost",       # XGBoost
+  "SL.randomForest",  # Random Forest
+  "SL.naiveBayes"     # Naive Bayes
+)
+```
+
+### 5. Run 5-fold SuperLearner cross-validation
+
+```{r ensemble-cv}
+set.seed(542)
+
+sl_cv <- CV.SuperLearner(
+  Y = Y,
+  X = X,
+  SL.library = learners,
+  family = binomial(),     # binary screening decision
+  V = 5,                   # 5-fold cross-validation
+  method = "method.NNLS",  # non-negative least squares
+  cvControl = list(stratifyCV = TRUE)
+)
+```
+
+### 6. Inspect ensemble weights
+
+```{r ensemble-weights}
+# Higher weight => learner contributes more to screening decisions
+# Often: logistic + xgboost dominate text-embedding ensembles
+sl_cv$SL.weights
+```
+
+### 7. Evaluate screening performance
+
+```{r roc-auc}
+# A. ROC-AUC (standard)
+
+library(pROC)
+
+roc_obj <- roc(Y, sl_cv$SL.predict)
+auc(roc_obj)
+```
+
+```{r recall-precision}
+# B. Recall-focused evaluation (critical for screening)
+
+threshold <- 0.2  # typical for high-recall screening
+
+pred <- ifelse(sl_cv$SL.predict >= threshold, 1, 0)
+
+recall <- sum(pred == 1 & Y == 1) / sum(Y == 1)
+precision <- sum(pred == 1 & Y == 1) / sum(pred == 1)
+
+recall
+precision
+# In systematic reviews, recall >= 0.95 is usually required
+# Precision can be low if recall is high
+```
+
+### 8. Identify false negatives (highest-cost errors)
+
+```{r false-negatives}
+# These are missed relevant papers, often reviewed manually.
+false_negatives <- which(Y == 1 & pred == 0)
+
+length(false_negatives)
+```
+
+### 9. Train final SuperLearner on full data (deployment model)
+
+```{r final-model}
+# After evaluation only:
+# Use final_sl only for future unseen articles, not performance claims.
+final_sl <- SuperLearner(
+  Y = Y,
+  X = X,
+  SL.library = learners,
+  family = binomial(),
+  method = "method.NNLS"
+)
+```
+
+### 10. Class-weighted SuperLearner (critical for imbalance)
+
+```{r class-weights}
+# Why: Systematic review screening is usually extremely imbalanced (e.g., 2-10% relevant).
+# Without weights, SuperLearner will under-optimize recall.
+
+# A. Compute inverse-frequency weights
+
+pos_rate <- mean(Y == 1)
+neg_rate <- mean(Y == 0)
+
+obs_weights <- ifelse(
+  Y == 1,
+  1 / pos_rate,
+  1 / neg_rate
+)
+```
+
+```{r weighted-cv}
+# B. Pass weights into SuperLearner
+sl_cv_weighted <- CV.SuperLearner(
+  Y = Y,
+  X = X,
+  SL.library = learners,
+  family = binomial(),
+  V = 5,
+  obsWeights = obs_weights,
+  method = "method.NNLS",
+  cvControl = list(stratifyCV = TRUE)
+)
+```
+
+### 11. Precision-Recall AUC (better than ROC for screening)
+
+```{r threshold-selection}
+# Why: Screening workflows require guaranteed recall (e.g., >= 95%), not arbitrary thresholds.
+
+# A. Find lowest threshold achieving target recall
+
+target_recall <- 0.95
+threshold_grid <- seq(0.01, 0.5, by = 0.005)
+
+threshold_perf <- sapply(threshold_grid, function(t) {
+  pred <- ifelse(sl_cv_weighted$SL.predict >= t, 1, 0)
+  sum(pred == 1 & Y == 1) / sum(Y == 1)
+})
+
+best_threshold <- min(threshold_grid[threshold_perf >= target_recall])
+
+best_threshold
+```
+
+```{r workload-reduction}
+# B. Compute workload reduction at that threshold
+
+pred_final <- ifelse(sl_cv_weighted$SL.predict >= best_threshold, 1, 0)
+
+workload_reduction <- 1 - mean(pred_final == 1)
+workload_reduction
+
+# This number is directly reportable. Often the key result in screening studies.
+```
+
+### 12. Probability calibration (Platt scaling)
+
+```{r calibration-fit}
+# Why: SuperLearner probabilities can be miscalibrated, especially with tree-based models.
+# Calibration improves threshold stability.
+
+# A. Fit calibration model using out-of-fold predictions
+calibration_model <- glm(
+  Y ~ sl_cv_weighted$SL.predict,
+  family = binomial()
+)
+```
+
+```{r calibration-predict}
+# B. Generate calibrated probabilities
+prob_calibrated <- predict(
+  calibration_model,
+  newdata = data.frame(sl_cv_weighted.SL.predict = sl_cv_weighted$SL.predict),
+  type = "response"
+)
+```
+
+```{r calibration-threshold}
+# C. Re-optimize threshold on calibrated probabilities
+threshold_perf_cal <- sapply(threshold_grid, function(t) {
+  pred <- ifelse(prob_calibrated >= t, 1, 0)
+  sum(pred == 1 & Y == 1) / sum(Y == 1)
+})
+
+best_threshold_cal <- min(threshold_grid[threshold_perf_cal >= target_recall])
+
+best_threshold_cal
+
+# Calibration is strongly recommended when using probabilities operationally
+# Improves generalization to new batches
+```

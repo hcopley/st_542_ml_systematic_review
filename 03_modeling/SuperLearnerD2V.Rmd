@@ -1,0 +1,97 @@
+---
+title: "SuperLearner Doc2Vec"
+author: "Heather, Jarrett, Andras"
+output: html_document
+---
+
+```{r install-superlearner, message=FALSE, warning=FALSE}
+# Install the SuperLearner package
+install.packages("SuperLearner")
+```
+
+```{r install-other, message=FALSE, warning=FALSE}
+# Install other packages
+install.packages(c("xgboost", "randomForest", "e1071", "glmnet", "ranger"))
+```
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+library(SuperLearner)
+library(xgboost)
+library(randomForest)
+library(e1071)
+library(glmnet)
+```
+
+```{r set-seed}
+# Set seed to ensure reproducibility
+set.seed(542)
+```
+
+```{r load-data}
+# Load the data
+data <- readRDS("doc2vec_dtst.rds")
+valid_folds <- readRDS("cv_folds.rds")
+```
+
+```{r outcome-predictors}
+# Separate features (X) and label (Y)
+Y <- data[, 2]
+X <- data[, -2]
+```
+
+```{r define-learners}
+# Define the learners
+library_names <- c("SL.glm",       # Logistic Regression
+                   "SL.svm",       # Support Vector Machine
+                   "SL.xgboost",   # XGBoost
+                   "SL.ranger",    # Random Forest
+                   "SL.naivebayes")# Naive Bayes
+
+# Customize SVM for classification if needed
+SL.svm.class <- function(..., kernel = "radial") SL.svm(..., kernel = kernel)
+```
+
+```{r cv-superlearner}
+# Run CV.SuperLearner with custom folds
+# This fits SL, then evaluates it using the 5-fold structure in valid_folds
+set.seed(542) # For reproducibility
+cv_sl <- CV.SuperLearner(Y = Y,
+                         X = X,
+                         family = binomial(), # Or gaussian() for regression
+                         SL.library = library_names[!library_names %in% c("SL.svm", "SL.naivebayes")], # Remove SL.svm due to 'infeasible nu' error and SL.naivebayes for 'object not found'
+                         cvControl = list(V = 5, validRows = valid_folds),
+                         innerCvControl = list(list(V = 5)),
+                         verbose = TRUE)
+```
+
+```{r check-results}
+# Check the results
+print(summary(cv_sl))
+plot(cv_sl)
+```
+
+```{r ensemble-coefficients}
+print(coef(cv_sl))
+```
+
+```{r final-model}
+# Run the SuperLearner fit the 5 pre-defined lists from cv_folds.rds
+sl_fit <- SuperLearner(
+  Y = Y,
+  X = X,
+  family = binomial(),
+  SL.library = library_names[!library_names %in% c("SL.svm", "SL.naivebayes")],
+  cvControl = list(
+    V = 5,
+    validRows = valid_folds
+  )
+)
+
+# View the final weights
+print(sl_fit)
+
+# Print the weights
+final_weights <- sl_fit$coef
+print(final_weights)
+```

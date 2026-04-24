@@ -343,6 +343,8 @@ ggplot(eval_results, aes(x = reorder(learner, auc_pr), y = auc_pr, fill = repres
     fill  = "Representation"
   ) +
   theme_minimal()
+
+
 ```
 
 ```{r}
@@ -413,6 +415,8 @@ ggplotly(p)
 
 ```
 
+
+
 ```{r}
 # ── Calibration plot function ─────────────────────────────────────────────────
 
@@ -435,7 +439,8 @@ calibration_plot <- function(labels, probs, title = "Calibration Plot", n_bins =
     )
   
   ggplot(cal_data, aes(x = mean_predicted, y = mean_observed)) +
-    geom_point(aes(size = n)) +
+    geom_point() +
+    geom_line() +
     geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
     xlim(0, 1) + ylim(0, 1) +
     labs(
@@ -496,6 +501,87 @@ for (rep_name in names(results_list)) {
   # Threshold at 95% recall
   thresh <- threshold_at_95(Y, best_probs)
   cat(sprintf("%s + %s: threshold at 95%% recall = %.4f\n", rep_name, best_learner, thresh))
+  
+  total_n <- nrow(dt_pubmed)  # same for all three since same dataset
+
+eval_results %>%
+  filter(!is.na(wss_95)) %>%
+  group_by(representation) %>%
+  slice_max(wss_95, n = 1) %>%
+  mutate(
+    records_saved = round(wss_95 * total_n),
+    records_to_screen = total_n - records_saved
+  )
+  
+  
 }
+```
+
+```{r}
+
+cal_data_all <- map_dfr(names(results_list), function(rep_name) {
+  res   <- results_list[[rep_name]]
+  Y     <- labels_list[[rep_name]]
+  preds <- as.data.frame(res$library.predict)
+  
+  colnames(preds) <- colnames(preds) %>%
+    str_remove("^SL\\.") %>%
+    str_remove("_All$")
+  
+  preds$SuperLearner <- as.vector(res$SL.predict)
+  
+  best_learner <- best_per_method %>%
+    filter(representation == rep_name) %>%
+    pull(learner)
+  
+  best_probs <- preds[[best_learner]]
+  
+  df <- tibble(prob = best_probs, outcome = as.numeric(Y), 
+               representation = rep_name,
+               facet_label = paste(rep_name, "+", best_learner))
+  
+  df$bin <- cut(df$prob,
+                breaks = quantile(df$prob, probs = seq(0, 1, length.out = 11), na.rm = TRUE),
+                include.lowest = TRUE)
+  
+  df %>%
+    group_by(facet_label, bin) %>%
+    summarise(mean_predicted = mean(prob), mean_observed = mean(outcome), .groups = "drop")
+})
+
+ggplot(cal_data_all, aes(x = mean_predicted, y = mean_observed, color = facet_label)) +
+  geom_line() +
+  geom_point(size = 2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted", color = "black") +
+  xlim(0, 1) + ylim(0, 1) +
+  labs(title = "Calibration by Text Representation", 
+       x = "Mean Predicted Probability", 
+       y = "Fraction of Positives", 
+       color = NULL) +
+  theme_bw()
+
+```
+
+```{r}
+
+library(knitr)
+library(kableExtra)
+
+best_threshold_table <- best_per_method %>%
+  mutate(threshold = case_when(
+    representation == "pubmed"  ~ 0.1732,
+    representation == "doc2vec" ~ 0.0785,
+    representation == "tfidf"   ~ 0.0600
+  )) %>%
+  mutate(across(c(wss_95, auc_pr, threshold), ~ round(.x, 3))) %>%
+  rename(
+    Representation = representation,
+    Learner        = learner,
+    `WSS@95`       = wss_95,
+    `AUC-PR`       = auc_pr,
+    Threshold      = threshold
+  ) %>%
+    arrange(desc(`WSS@95`))
+
 ```
 
