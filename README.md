@@ -27,6 +27,7 @@ Folders are numbered to encourage a consistent execution order.
 ├── 04_output
 ├── 05_docs
 ├── 06_exports
+├── 07_sandbox
 ├── README.md
 ├── LICENSE
 └── .gitignore
@@ -98,8 +99,8 @@ No raw data should be introduced here.
 Intermediate analytical outputs.
 
 This folder is used for:
-- Tables, figures, and summaries generated during QA or modeling
-- Diagnostic plots
+- data generated during QA or modeling
+- model results (e.g., predictions, performance metrics)
 - Temporary outputs used during development
 
 Files here are typically reproducible and can be regenerated.
@@ -127,6 +128,18 @@ This folder contains:
 - Files used for submission or presentation
 
 Outputs here are typically stable and versioned.
+
+---
+
+### `07_sandbox/`
+Test files, intermediate working files, and sample data used in testing.
+
+This folder contains:
+- Files used for testing scripts or modeling approaches
+- Data subsets used for debugging
+- Files that are not intended for sharing but were used during the development process
+
+Outputs are not intended for sharing and may be deleted after use.
 
 ---
 
